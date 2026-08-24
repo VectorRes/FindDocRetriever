@@ -1,0 +1,16 @@
+.env
+.claude/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# Uploaded/generated Excel workbooks (test data, sample files) — never commit real documents.
+*.xlsx
+*.xlsm
+*.xls
+*.xltm
+*.xltx
+!backend/tests/fixtures/**/*.xlsx
