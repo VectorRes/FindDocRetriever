@@ -20,9 +20,15 @@ class Settings(BaseSettings):
     local_embedding_model: str = "BAAI/bge-m3"
     local_embedding_dimensions: int = 1024
 
-    # PDF ingestion: character-based sliding window over each page's extracted text.
+    # PDF ingestion: native text extraction first, OCR fallback for scanned pages.
     pdf_chunk_size: int = 1000
     pdf_chunk_overlap: int = 150
+    pdf_ocr_enabled: bool = True
+    pdf_ocr_dpi: int = 300
+    pdf_ocr_language: str = "eng+spa"
+    # OCR is used when native extraction yields fewer than this many non-space chars.
+    # Keep at 1 to OCR only image-only pages; raise it for PDFs with broken text layers.
+    pdf_ocr_min_native_chars: int = 1
 
     # API
     api_host: str = "0.0.0.0"

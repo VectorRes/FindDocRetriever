@@ -15,15 +15,39 @@ def test_extracts_text_per_page(tmp_path):
     assert "Second page notes" in result.pages[1].text
 
 
-def test_page_with_no_text_flagged_and_skipped(tmp_path):
+def test_page_with_no_native_text_uses_ocr_fallback(tmp_path, monkeypatch):
     path = tmp_path / "mixed.pdf"
     path.write_bytes(make_pdf_bytes(["Has text here.", ""]))
+
+    def fake_ocr(_path, page_index, *, dpi, language):
+        assert page_index == 1
+        assert dpi == 300
+        assert "eng" in language
+        return "Scanned page recovered by OCR."
+
+    monkeypatch.setattr("app.ingestion.pdf_parser._ocr_pdf_page", fake_ocr)
+
+    result = parse_pdf(path)
+
+    assert [p.number for p in result.pages] == [1, 2]
+    assert result.pages[1].text == "Scanned page recovered by OCR."
+    assert any("OCR was used" in w for w in result.warnings)
+    assert any("[2]" in w for w in result.warnings)
+
+
+def test_native_text_page_does_not_run_ocr(tmp_path, monkeypatch):
+    path = tmp_path / "digital.pdf"
+    path.write_bytes(make_pdf_bytes(["Machine-readable financial statement."]))
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("OCR must not run for a normal text PDF page")
+
+    monkeypatch.setattr("app.ingestion.pdf_parser._ocr_pdf_page", fail_if_called)
 
     result = parse_pdf(path)
 
     assert [p.number for p in result.pages] == [1]
-    assert any("no extractable text" in w for w in result.warnings)
-    assert any("[2]" in w for w in result.warnings)
+    assert "Machine-readable financial statement" in result.pages[0].text
 
 
 def test_encrypted_pdf_with_empty_user_password_is_decrypted(tmp_path):
