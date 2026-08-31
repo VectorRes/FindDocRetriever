@@ -25,13 +25,20 @@ def test_ingest_and_query_round_trip(tmp_path, db_session):
     wb.save(file_path)
 
     document = ingest_excel_file(db_session, filename="budget.xlsx", file_path=file_path)
-    assert document.status == "ready"
+    try:
+        assert document.status == "ready"
 
-    results = retrieve(db_session, question="What is the Revenue line item?", top_k=5)
+        results = retrieve(db_session, question="What is the Revenue line item?", top_k=5)
 
-    assert results, "expected at least one retrieved chunk"
-    assert any("Revenue" in r.text for r in results)
-    assert results[0].document_filename == "budget.xlsx"
-    top_hit = next(r for r in results if "Revenue" in r.text)
-    assert top_hit.sheet_name == "Budget"
-    assert top_hit.cell_range == "A2:B2"
+        assert results, "expected at least one retrieved chunk"
+        assert any("Revenue" in r.text for r in results)
+        assert results[0].document_filename == "budget.xlsx"
+        top_hit = next(r for r in results if "Revenue" in r.text)
+        assert top_hit.sheet_name == "Budget"
+        assert top_hit.cell_range == "A2:B2"
+    finally:
+        # Ingestion commits directly (it isn't wrapped in the test's rollback-only
+        # session), so without this, ingested rows pile up in Postgres across
+        # runs and can contaminate other integration tests' top-k results.
+        db_session.delete(document)
+        db_session.commit()

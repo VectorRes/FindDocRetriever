@@ -22,14 +22,21 @@ def test_ingest_and_query_round_trip(tmp_path, db_session):
     )
 
     document = ingest_pdf_file(db_session, filename="q3_report.pdf", file_path=file_path)
-    assert document.status == "ready"
-    assert document.doc_type == "pdf"
+    try:
+        assert document.status == "ready"
+        assert document.doc_type == "pdf"
 
-    results = retrieve(db_session, question="What was Q3 revenue?", top_k=5)
+        results = retrieve(db_session, question="What was Q3 revenue?", top_k=5)
 
-    assert results, "expected at least one retrieved chunk"
-    top_hit = next(r for r in results if "revenue" in r.text.lower())
-    assert top_hit.document_filename == "q3_report.pdf"
-    assert top_hit.page_number == 1
-    assert top_hit.sheet_name is None
-    assert top_hit.cell_range is None
+        assert results, "expected at least one retrieved chunk"
+        top_hit = next(r for r in results if "revenue" in r.text.lower())
+        assert top_hit.document_filename == "q3_report.pdf"
+        assert top_hit.page_number == 1
+        assert top_hit.sheet_name is None
+        assert top_hit.cell_range is None
+    finally:
+        # Ingestion commits directly (it isn't wrapped in the test's rollback-only
+        # session), so without this, ingested rows pile up in Postgres across
+        # runs and can contaminate other integration tests' top-k results.
+        db_session.delete(document)
+        db_session.commit()
