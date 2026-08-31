@@ -4,53 +4,11 @@ Requires a reachable database (run via `docker compose up`, or point
 DATABASE_URL at a local Postgres+pgvector instance). Skips otherwise.
 """
 import openpyxl
-import pytest
 
-import app.ingestion.service as ingestion_service_module
-import app.retrieval.service as retrieval_service_module
-from app.config import get_settings
-from app.db.session import SessionLocal, engine
 from app.ingestion.service import ingest_excel_file
 from app.retrieval.service import retrieve
 
-
-class FakeEmbeddingProvider:
-    """Deterministic bag-of-words embedding, sized to match the migrated
-    vector column, so tests don't need real API/model calls."""
-
-    def __init__(self):
-        self.dimensions = get_settings().embedding_dimensions
-
-    def embed(self, texts: list[str]) -> list[list[float]]:
-        return [self._vector(t) for t in texts]
-
-    def _vector(self, text: str) -> list[float]:
-        vector = [0.0] * self.dimensions
-        for word in text.lower().split():
-            vector[hash(word) % self.dimensions] += 1.0
-        norm = sum(v * v for v in vector) ** 0.5 or 1.0
-        return [v / norm for v in vector]
-
-
-@pytest.fixture(autouse=True)
-def fake_embeddings(monkeypatch):
-    provider = FakeEmbeddingProvider()
-    monkeypatch.setattr(ingestion_service_module, "get_embedding_provider", lambda: provider)
-    monkeypatch.setattr(retrieval_service_module, "get_embedding_provider", lambda: provider)
-
-
-@pytest.fixture
-def db_session():
-    try:
-        with engine.connect():
-            pass
-    except Exception:
-        pytest.skip("Postgres/pgvector not reachable — start it with `docker compose up`")
-
-    session = SessionLocal()
-    yield session
-    session.rollback()
-    session.close()
+# fake_embeddings and db_session fixtures come from conftest.py
 
 
 def test_ingest_and_query_round_trip(tmp_path, db_session):

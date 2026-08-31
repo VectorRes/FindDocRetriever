@@ -1,14 +1,16 @@
-# FinDoc Retriever — RAG de Excel
+# FinDoc Retriever — RAG de Excel y PDF
 
-Motor de ingesta y recuperación semántica para workbooks `.xlsx`. Extrae hojas, celdas,
-fórmulas y referencias cruzadas, las indexa (datos estructurados + embeddings vectoriales)
-y expone una API para consultarlas en lenguaje natural con citación exacta (documento,
-hoja, celda).
+Motor de ingesta y recuperación semántica para workbooks `.xlsx`/`.xlsm` y documentos
+`.pdf`. Extrae hojas, celdas, fórmulas y referencias cruzadas (Excel) o texto por
+página (PDF), indexa todo (datos estructurados + embeddings vectoriales) y expone
+una API para consultarlo en lenguaje natural con citación exacta (documento, hoja,
+celda — o página, para PDF).
 
 Cubre las historias de usuario **BE-001, BE-002, BE-003** (ingesta de Excel) y **BE-007**
-(recuperación) del documento `FinDoc_Retriever_User_Stories...md`. No incluye todavía
-generación de respuestas con LLM (BE-008/BE-009) ni el agente de LangChain — esta pieza
-es la base de recuperación que ese agente usará más adelante como herramienta.
+(recuperación) del documento `FinDoc_Retriever_User_Stories...md`, más ingesta de PDF
+como extensión del mismo pipeline de recuperación. No incluye todavía generación de
+respuestas con LLM (BE-008/BE-009) ni el agente de LangChain — esta pieza es la base
+de recuperación que ese agente usará más adelante como herramienta.
 
 ## Levantar el entorno
 
@@ -32,6 +34,7 @@ Las migraciones de Alembic se aplican automáticamente al arrancar el contenedor
 | `OPENAI_API_KEY`, `OPENAI_EMBEDDING_MODEL`, `OPENAI_EMBEDDING_DIMENSIONS` | Config del proveedor `openai` |
 | `LOCAL_EMBEDDING_MODEL`, `LOCAL_EMBEDDING_DIMENSIONS` | Config del proveedor `local` (sentence-transformers, corre en el mismo contenedor, sin llamadas externas) |
 | `RETRIEVAL_TOP_K` | Cantidad de chunks devueltos por consulta |
+| `PDF_CHUNK_SIZE`, `PDF_CHUNK_OVERLAP` | Tamaño (caracteres) y solape de la ventana deslizante usada para trocear el texto de cada página PDF |
 
 **Cambiar de proveedor de embeddings requiere re-indexar**: la dimensión del vector queda
 fija en la tabla `chunks` desde la migración inicial (según `EMBEDDING_PROVIDER` en el
@@ -40,16 +43,33 @@ momento de migrar). Para comparar `openai` vs `local`, lo más simple es usar ba
 
 ## API
 
-- `POST /ingest` — sube un `.xlsx`/`.xlsm` (multipart `file`), lo parsea, indexa y devuelve
-  el estado del documento (`ready`/`failed`) junto con los warnings de ingesta (macros,
-  enlaces externos, hojas protegidas, referencias circulares).
+- `POST /ingest` — sube un `.xlsx`/`.xlsm` o un `.pdf` (multipart `file`), lo parsea,
+  indexa y devuelve el estado del documento (`ready`/`failed`) junto con `doc_type`
+  (`excel`/`pdf`) y los warnings de ingesta:
+  - Excel: macros, enlaces externos, hojas protegidas, referencias circulares.
+  - PDF: páginas sin texto extraíble (típicamente escaneadas, sin OCR) y PDFs
+    cifrados (se intenta descifrar con contraseña vacía; si requiere contraseña
+    real, se marca como `failed` con un warning explicativo y no se extrae nada).
 - `POST /query` — `{"question": "..."}` → chunks más relevantes, cada uno con
-  `document_filename`, `sheet_name`, `cell_range` y el texto citado.
+  `document_filename` y, según el tipo de documento, `sheet_name`+`cell_range`
+  (Excel) o `page_number` (PDF).
 - `GET /health` — chequeo básico.
 
 Documentación interactiva en `http://localhost:8000/docs`.
 
-## Probar con un archivo de ejemplo
+## Probar con un PDF de ejemplo
+
+```bash
+curl -X POST http://localhost:8000/ingest -F "file=@informe_q3.pdf"
+curl -X POST http://localhost:8000/query -H "Content-Type: application/json" \
+  -d '{"question": "¿Cuál fue el ingreso del Q3?"}'
+```
+
+La respuesta de `/query` incluirá `page_number` en cada chunk citando la página del
+PDF de la que proviene el texto (no aplica `sheet_name`/`cell_range`, que quedan
+`null` para documentos PDF).
+
+## Probar con un archivo Excel de ejemplo
 
 Los `.xlsx` no se versionan en el repo (ver `.gitignore`) — son datos, no código. Para
 generar un workbook de prueba con hojas, fórmulas cruzadas, un named range y una celda
@@ -98,10 +118,13 @@ O usa cualquier `.xlsx` propio arrastrándolo en `http://localhost:8000/docs` (e
 docker compose exec api pytest
 ```
 
-Los tests de `excel_parser` y `chunker` no requieren base de datos. `test_retrieval.py`
-es un test de integración que necesita Postgres/pgvector accesible (se salta automáticamente
-si no lo está) y usa un proveedor de embeddings falso y determinista para no depender de
-una API externa ni descargar modelos.
+Los tests de `excel_parser`, `pdf_parser` y `chunker` no requieren base de datos —
+los de PDF generan sus propios archivos `.pdf` mínimos en `tests/pdf_helpers.py`,
+sin depender de una librería de autoría de PDFs. `test_retrieval.py` y
+`test_retrieval_pdf.py` son tests de integración que necesitan Postgres/pgvector
+accesible (se saltan automáticamente si no lo está) y usan un proveedor de
+embeddings falso y determinista (en `tests/conftest.py`) para no depender de una
+API externa ni descargar modelos.
 
 ## Estructura
 
@@ -111,8 +134,9 @@ backend/app/
   db/models.py        # Document, Sheet, Cell, NamedRange, Chunk
   ingestion/
     excel_parser.py    # extracción con openpyxl
-    chunker.py           # arma chunks embebibles con metadata de citación
-    service.py             # orquesta parseo -> persistencia -> embeddings
+    pdf_parser.py         # extracción de texto por página con pypdf
+    chunker.py               # arma chunks embebibles con metadata de citación (Excel y PDF)
+    service.py                  # orquesta parseo -> persistencia -> embeddings
   embeddings/            # proveedor intercambiable (openai / local)
   retrieval/              # búsqueda por similitud en pgvector
   api/                      # endpoints FastAPI

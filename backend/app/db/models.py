@@ -36,6 +36,8 @@ class Document(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
     filename: Mapped[str] = mapped_column(String(512))
+    # "excel" or "pdf" — determines which parser/chunker produced this document's chunks.
+    doc_type: Mapped[str] = mapped_column(String(16), default="excel")
     status: Mapped[str] = mapped_column(String(32), default=DocumentStatus.queued.value)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Non-fatal ingestion warnings: macros, external links, protected sheets, circular refs.
@@ -103,6 +105,8 @@ class Chunk(Base):
     document_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"))
     sheet_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     cell_range: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 1-indexed PDF page this chunk came from; null for Excel chunks.
+    page_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     text: Mapped[str] = mapped_column(Text)
     embedding = mapped_column(Vector(get_settings().embedding_dimensions))
 

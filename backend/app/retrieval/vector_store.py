@@ -9,16 +9,19 @@ from app.db.models import Chunk
 def add_chunks(
     db: Session,
     document_id: UUID,
-    chunks: list[tuple[str, str | None, str | None]],
+    chunks: list[tuple[str, str | None, str | None, int | None]],
     embeddings: list[list[float]],
 ) -> list[Chunk]:
-    """chunks: list of (text, sheet_name, cell_range), same order as embeddings."""
+    """chunks: list of (text, sheet_name, cell_range, page_number), same order as
+    embeddings. Excel chunks set page_number=None; PDF chunks set sheet_name and
+    cell_range=None."""
     rows = []
-    for (text, sheet_name, cell_range), embedding in zip(chunks, embeddings):
+    for (text, sheet_name, cell_range, page_number), embedding in zip(chunks, embeddings):
         row = Chunk(
             document_id=document_id,
             sheet_name=sheet_name,
             cell_range=cell_range,
+            page_number=page_number,
             text=text,
             embedding=embedding,
         )

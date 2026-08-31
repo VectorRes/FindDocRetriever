@@ -17,8 +17,12 @@ class Settings(BaseSettings):
     openai_embedding_model: str = "text-embedding-3-small"
     openai_embedding_dimensions: int = 1536
 
-    local_embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
-    local_embedding_dimensions: int = 384
+    local_embedding_model: str = "BAAI/bge-m3"
+    local_embedding_dimensions: int = 1024
+
+    # PDF ingestion: character-based sliding window over each page's extracted text.
+    pdf_chunk_size: int = 1000
+    pdf_chunk_overlap: int = 150
 
     # API
     api_host: str = "0.0.0.0"

@@ -1,4 +1,5 @@
-"""Turns a parsed workbook into retrievable text chunks with citation metadata."""
+"""Turns parsed documents (workbooks, PDFs) into retrievable text chunks with
+citation metadata."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,6 +7,7 @@ from dataclasses import dataclass
 from openpyxl.utils import get_column_letter
 
 from app.ingestion.excel_parser import ParsedSheet, ParsedWorkbook
+from app.ingestion.pdf_parser import ParsedPdfDocument, ParsedPdfPage
 
 
 @dataclass
@@ -13,6 +15,7 @@ class Chunk:
     sheet_name: str | None
     cell_range: str | None
     text: str
+    page_number: int | None = None
 
 
 def _header_row(sheet: ParsedSheet) -> tuple[int | None, dict[int, str]]:
@@ -74,4 +77,60 @@ def chunk_workbook(workbook: ParsedWorkbook) -> list[Chunk]:
     chunks: list[Chunk] = []
     for sheet in workbook.sheets:
         chunks.extend(chunk_sheet(sheet))
+    return chunks
+
+
+def _split_into_windows(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
+    """Word-boundary sliding window over `text`. Never splits a word in half,
+    and always makes forward progress even if a single word exceeds chunk_size."""
+    words = text.split()
+    if not words:
+        return []
+
+    windows: list[str] = []
+    start = 0
+    while start < len(words):
+        window_words: list[str] = []
+        length = 0
+        end = start
+        while end < len(words):
+            projected = length + (1 if window_words else 0) + len(words[end])
+            if window_words and projected > chunk_size:
+                break
+            window_words.append(words[end])
+            length = projected
+            end += 1
+        windows.append(" ".join(window_words))
+
+        if end >= len(words):
+            break
+
+        # Step forward by (window size - overlap), measured in words, so
+        # consecutive chunks share roughly `chunk_overlap` characters of
+        # context without re-scanning character offsets.
+        overlap_words = 0
+        overlap_len = 0
+        i = end - 1
+        while i >= start and overlap_len < chunk_overlap:
+            overlap_len += len(words[i]) + 1
+            overlap_words += 1
+            i -= 1
+        next_start = end - overlap_words
+        start = next_start if next_start > start else end
+
+    return windows
+
+
+def chunk_pdf_page(page: ParsedPdfPage, chunk_size: int = 1000, chunk_overlap: int = 150) -> list[Chunk]:
+    windows = _split_into_windows(page.text, chunk_size, chunk_overlap)
+    return [
+        Chunk(sheet_name=None, cell_range=None, text=window, page_number=page.number)
+        for window in windows
+    ]
+
+
+def chunk_pdf(document: ParsedPdfDocument, chunk_size: int = 1000, chunk_overlap: int = 150) -> list[Chunk]:
+    chunks: list[Chunk] = []
+    for page in document.pages:
+        chunks.extend(chunk_pdf_page(page, chunk_size=chunk_size, chunk_overlap=chunk_overlap))
     return chunks

@@ -6,12 +6,14 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.ingestion.service import ingest_excel_file
+from app.ingestion.service import ingest_excel_file, ingest_pdf_file
 from app.schemas import DocumentOut
 
 router = APIRouter()
 
-ALLOWED_EXTENSIONS = {".xlsx", ".xlsm"}
+EXCEL_EXTENSIONS = {".xlsx", ".xlsm"}
+PDF_EXTENSIONS = {".pdf"}
+ALLOWED_EXTENSIONS = EXCEL_EXTENSIONS | PDF_EXTENSIONS
 
 
 @router.post("/ingest", response_model=DocumentOut)
@@ -25,7 +27,10 @@ async def ingest_document(file: UploadFile, db: Session = Depends(get_db)) -> Do
         tmp_path = Path(tmp.name)
 
     try:
-        document = ingest_excel_file(db, filename=file.filename, file_path=tmp_path)
+        if suffix in PDF_EXTENSIONS:
+            document = ingest_pdf_file(db, filename=file.filename, file_path=tmp_path)
+        else:
+            document = ingest_excel_file(db, filename=file.filename, file_path=tmp_path)
     finally:
         tmp_path.unlink(missing_ok=True)
 

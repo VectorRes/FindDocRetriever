@@ -9,6 +9,7 @@ class DocumentOut(BaseModel):
 
     id: UUID
     filename: str
+    doc_type: str
     status: str
     error_message: str | None
     warnings: list[str]
@@ -27,6 +28,7 @@ class RetrievedChunkOut(BaseModel):
     document_filename: str
     sheet_name: str | None
     cell_range: str | None
+    page_number: int | None
     text: str
 
 

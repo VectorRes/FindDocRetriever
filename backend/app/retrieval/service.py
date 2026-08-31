@@ -13,6 +13,7 @@ class RetrievedChunk:
     document_filename: str
     sheet_name: str | None
     cell_range: str | None
+    page_number: int | None
     text: str
 
 
@@ -29,6 +30,7 @@ def retrieve(db: Session, question: str, top_k: int | None = None) -> list[Retri
             document_filename=chunk.document.filename,
             sheet_name=chunk.sheet_name,
             cell_range=chunk.cell_range,
+            page_number=chunk.page_number,
             text=chunk.text,
         )
         for chunk in chunks
