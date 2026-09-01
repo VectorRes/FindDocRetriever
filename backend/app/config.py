@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     # OCR is used when native extraction yields fewer than this many non-space chars.
     # Keep at 1 to OCR only image-only pages; raise it for PDFs with broken text layers.
     pdf_ocr_min_native_chars: int = 1
+    # OCR text whose average per-word Tesseract confidence (0-1) falls below this
+    # threshold is tagged "low confidence — verify against scan" when indexed.
+    pdf_ocr_low_confidence_threshold: float = 0.70
 
     # API
     api_host: str = "0.0.0.0"
