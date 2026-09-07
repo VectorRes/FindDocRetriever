@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     openai_embedding_model: str = "text-embedding-3-small"
     openai_embedding_dimensions: int = 1536
 
+    # QA generation agent (LangGraph + LangChain, backed by the OpenAI chat API)
+    openai_chat_model: str = "gpt-4o-mini"
+    qa_temperature: float = 0.0
+
     local_embedding_model: str = "BAAI/bge-m3"
     local_embedding_dimensions: int = 1024
 

@@ -4,8 +4,9 @@ from sqlalchemy.orm import Session
 
 from app.db.models import Document, PdfReference, PdfTable
 from app.db.session import get_db
+from app.qa.service import answer_question
 from app.retrieval.service import retrieve
-from app.schemas import PdfStructureResponse, QueryRequest, QueryResponse
+from app.schemas import AnswerResponse, PdfStructureResponse, QueryRequest, QueryResponse
 
 router = APIRouter()
 
@@ -14,6 +15,12 @@ router = APIRouter()
 def query(request: QueryRequest, db: Session = Depends(get_db)) -> QueryResponse:
     results = retrieve(db, question=request.question, top_k=request.top_k)
     return QueryResponse(question=request.question, results=results)
+
+
+@router.post("/query/answer", response_model=AnswerResponse)
+def query_answer(request: QueryRequest, db: Session = Depends(get_db)) -> AnswerResponse:
+    """ID-HU-BE-008: retrieve sources and generate a grounded, cited answer."""
+    return answer_question(db, question=request.question, top_k=request.top_k)
 
 
 @router.get("/documents/{document_id}/pdf-structure", response_model=PdfStructureResponse)

@@ -70,3 +70,39 @@ class PdfStructureResponse(BaseModel):
 class QueryResponse(BaseModel):
     question: str
     results: list[RetrievedChunkOut]
+
+
+class CitationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    source_id: str
+    document_id: str
+    document_filename: str
+    sheet_name: str | None
+    cell_range: str | None
+    page_number: int | None
+    reference_number: str | None
+    text: str
+
+
+class StatementOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    text: str
+    citations: list[CitationOut]
+    conflicting: bool
+
+
+class AnswerResponse(BaseModel):
+    """Response for ID-HU-BE-008: a grounded answer, every statement cited."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    question: str
+    statements: list[StatementOut]
+    sources: list[CitationOut]
+    has_conflicts: bool
+    # False when no statement could be safely grounded (e.g. no relevant sources
+    # were retrieved at all) — see ID-HU-BE-009 for the fuller "no confident
+    # answer" / clarification flow built on top of this signal.
+    grounded: bool
