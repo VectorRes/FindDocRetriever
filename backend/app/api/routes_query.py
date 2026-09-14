@@ -19,8 +19,14 @@ def query(request: QueryRequest, db: Session = Depends(get_db)) -> QueryResponse
 
 @router.post("/query/answer", response_model=AnswerResponse)
 def query_answer(request: QueryRequest, db: Session = Depends(get_db)) -> AnswerResponse:
-    """ID-HU-BE-008: retrieve sources and generate a grounded, cited answer."""
-    return answer_question(db, question=request.question, top_k=request.top_k)
+    """ID-HU-BE-008: retrieve sources and generate a grounded, cited answer.
+
+    Also implements the follow-up context part of ID-HU-BE-008/FE-001: pass
+    `session_id` from the previous response to keep the conversation's context.
+    """
+    return answer_question(
+        db, question=request.question, top_k=request.top_k, session_id=request.session_id
+    )
 
 
 @router.get("/documents/{document_id}/pdf-structure", response_model=PdfStructureResponse)

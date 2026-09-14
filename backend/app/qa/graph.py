@@ -26,6 +26,9 @@ from app.retrieval.service import RetrievedChunk
 class QAState(TypedDict, total=False):
     question: str
     chunks: list[RetrievedChunk]
+    # Prior (question, answer_text) turns from the same conversation session,
+    # oldest first — context only, never a citable source (ID-HU-FE-001).
+    history: list[tuple[str, str]]
     source_map: dict[str, RetrievedChunk]
     raw_answer: LLMGroundedAnswer
     answer: GroundedAnswer
@@ -42,7 +45,10 @@ def generate_node(state: QAState) -> QAState:
     raw_answer = structured_llm.invoke(
         [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": build_user_prompt(state["question"], source_map)},
+            {
+                "role": "user",
+                "content": build_user_prompt(state["question"], source_map, state.get("history")),
+            },
         ]
     )
     return {"source_map": source_map, "raw_answer": raw_answer}

@@ -42,6 +42,18 @@ class Settings(BaseSettings):
     api_port: int = 8000
     retrieval_top_k: int = 8
 
+    # Comma-separated list of origins allowed to call the API (the frontend dev server, etc.)
+    cors_allowed_origins_raw: str = "http://localhost:5173"
+
+    # Directory the original uploaded files are persisted to (ID-HU-FE-002's
+    # "open original file" action and the PDF viewer both need the real bytes,
+    # not just the extracted text/cells). Mounted as a Docker volume.
+    document_storage_dir: str = "/data/documents"
+
+    @property
+    def cors_allowed_origins(self) -> list[str]:
+        return [o.strip() for o in self.cors_allowed_origins_raw.split(",") if o.strip()]
+
     @property
     def embedding_dimensions(self) -> int:
         return (

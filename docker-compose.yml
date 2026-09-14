@@ -25,11 +25,13 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL}
       WATCHFILES_FORCE_POLLING: "true"
+      DOCUMENT_STORAGE_DIR: ${DOCUMENT_STORAGE_DIR:-/data/documents}
     ports:
       - "8000:8000"
     volumes:
       - ./backend/app:/app/app
       - hf_cache:/root/.cache/huggingface
+      - document_storage:/data/documents
     depends_on:
       postgres:
         condition: service_healthy
@@ -37,6 +39,24 @@ services:
       sh -c "alembic upgrade head &&
              uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
 
+  frontend:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      VITE_API_URL: ${VITE_API_URL}
+    ports:
+      - "${FRONTEND_PORT:-5173}:5173"
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/index.html:/app/index.html
+      - ./frontend/vite.config.ts:/app/vite.config.ts
+    depends_on:
+      - api
+
 volumes:
   postgres_data:
   hf_cache:
+  document_storage:

@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.ingestion.service import ingest_excel_file, ingest_pdf_file
 from app.schemas import DocumentOut
+from app.storage import save_document_file
 
 router = APIRouter()
 
@@ -31,6 +32,13 @@ async def ingest_document(file: UploadFile, db: Session = Depends(get_db)) -> Do
             document = ingest_pdf_file(db, filename=file.filename, file_path=tmp_path)
         else:
             document = ingest_excel_file(db, filename=file.filename, file_path=tmp_path)
+
+        # Persist the original bytes regardless of ingestion outcome — the
+        # Source Verification Panel's "open original file" and PDF viewer
+        # need the real file, not just what got extracted into the DB.
+        document.storage_path = save_document_file(document.id, suffix, tmp_path)
+        db.commit()
+        db.refresh(document)
     finally:
         tmp_path.unlink(missing_ok=True)
 

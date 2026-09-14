@@ -7,9 +7,11 @@ escaneadas), indexa todo (datos estructurados + embeddings vectoriales) y expone
 API para consultarlo en lenguaje natural con citación exacta (documento, hoja, celda
 — o página y tabla/nota, para PDF).
 
-Incluye ingesta de Excel (hojas, celdas, fórmulas, referencias cruzadas) y un pipeline
+Incluye ingesta de Excel (hojas, celdas, fórmulas, referencias cruzadas), un pipeline
 de ingesta de PDF (texto nativo + OCR, extracción de tablas financieras y de
-notas/secciones numeradas) construido sobre el mismo motor de recuperación.
+notas/secciones numeradas), un motor de QA con respuestas citadas y contexto
+conversacional (ID-HU-BE-008 / FE-001), y un frontend React con chat + panel de
+verificación de fuente (ID-HU-FE-001 / FE-002).
 
 ## Levantar el entorno
 
@@ -22,10 +24,13 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Esto levanta Postgres (con la extensión `pgvector`) y la API FastAPI en `http://localhost:8000`.
+Esto levanta Postgres (con la extensión `pgvector`), la API FastAPI en
+`http://localhost:8000` y el frontend en `http://localhost:5173`.
 Las migraciones de Alembic se aplican automáticamente al arrancar el contenedor `api`.
 La imagen de la API también instala `tesseract-ocr` (paquetes de idioma `eng` y `spa`),
-necesario para el fallback de OCR sobre páginas de PDF escaneadas.
+necesario para el fallback de OCR sobre páginas de PDF escaneadas. Los archivos
+originales subidos se persisten en un volumen Docker (`document_storage`), para poder
+servirlos de nuevo desde el panel de verificación de fuente del frontend.
 
 ## Variables de entorno (`.env`)
 
@@ -42,6 +47,10 @@ necesario para el fallback de OCR sobre páginas de PDF escaneadas.
 | `PDF_OCR_LANGUAGE` | Idiomas de Tesseract, formato `eng+spa` |
 | `PDF_OCR_MIN_NATIVE_CHARS` | Umbral (caracteres no-espacio) de texto nativo por debajo del cual una página se considera "sin texto útil" y se manda a OCR. En 1 solo hace OCR a páginas puramente imagen; subirlo ayuda con PDFs cuya capa de texto está rota |
 | `PDF_OCR_LOW_CONFIDENCE_THRESHOLD` | (sin variable de entorno en `.env.example`, valor por defecto `0.70` en `config.py`) Confianza promedio por palabra de Tesseract por debajo de la cual el texto OCR de una página se etiqueta `"low confidence — verify against scan"` |
+| `CORS_ALLOWED_ORIGINS_RAW` | Orígenes permitidos para llamar a la API, separados por coma (el frontend dev server, etc.) |
+| `DOCUMENT_STORAGE_DIR` | Directorio (montado como volumen Docker) donde se persisten los archivos originales subidos, para "abrir archivo original" y el visor de PDF |
+| `VITE_API_URL` | URL de la API que usa el frontend para sus llamadas |
+| `FRONTEND_PORT` | Puerto host publicado para el frontend (por defecto `5173`) |
 
 **Cambiar de proveedor de embeddings requiere re-indexar**: la dimensión del vector queda
 fija en la tabla `chunks` desde la migración inicial (según `EMBEDDING_PROVIDER` en el
@@ -103,9 +112,54 @@ momento de migrar). Para comparar `openai` vs `local`, lo más simple es usar ba
   `confidence_label`, `raw_text`) y todas sus notas/secciones detectadas
   (`reference_type`, `reference_number`, `title`, `text`), ordenadas por página.
   Responde `400` si el documento no es un PDF y `404` si no existe.
+- `POST /query/answer` (ID-HU-BE-008/FE-001) — `{"question": "...", "top_k":
+  <opcional>, "session_id": <opcional>}` → respuesta citada y fundamentada
+  (`statements[]`, cada uno con `citations[]`), `grounded` (`false` = "no
+  encontré una respuesta confiable"), y `session_id` — pasalo de vuelta en la
+  siguiente pregunta para mantener contexto conversacional (resolución de
+  pronombres/referencias implícitas tipo "¿y el trimestre pasado?"). Incluye
+  también `needs_clarification`/`clarification_question`, el contrato para
+  ID-HU-BE-009 (detección de ambigüedad) — siempre `false`/`null` hasta que esa
+  historia se implemente.
+- `GET /documents/{document_id}/resolve` (ID-HU-FE-002) — antes de mostrar la
+  fuente de una citación: si el documento fue superado por una versión más
+  reciente (`is_superseded` + `current_version`) y si el usuario tiene acceso
+  (`access.allowed`/`access.reason`, según `confidentiality_tag` y el header
+  `X-User-Role`, por defecto `analyst`; solo `admin` ve documentos
+  `restricted` — placeholder mínimo hasta que exista control de acceso real).
+- `GET /documents/{document_id}/cells/{sheet_name}/{address}` — valor, fórmula
+  y `formula_references` de una celda citada. Respeta el mismo control de
+  acceso que `/resolve`.
+- `GET /documents/{document_id}/file` — sirve el archivo original ("abrir
+  archivo original" y el visor de PDF). `404` si nunca se persistió, `403` si
+  el documento está `restricted` y el rol no alcanza.
+- `POST /documents/{document_id}/supersede` — `{"new_document_id": "..."}`,
+  enlaza explícitamente una versión vieja con la nueva (no hay detección
+  automática de "mismo nombre = nueva versión" al ingerir).
+- `PATCH /documents/{document_id}/confidentiality` — `{"tag": "public" |
+  "restricted"}`.
 - `GET /health` — chequeo básico.
 
 Documentación interactiva en `http://localhost:8000/docs`.
+
+## Frontend
+
+React + Vite (TypeScript) en `frontend/`, servido en `http://localhost:5173` vía el
+servicio `frontend` de `docker-compose.yml` (hot-reload con polling — necesario en
+Docker Desktop sobre Windows, donde los bind mounts no reenvían eventos `inotify`).
+
+- **Chat (ID-HU-FE-001)**: `frontend/src/components/Chat.tsx` — input de
+  preguntas, historial de la conversación, badges de citación clicables,
+  estados de "sin respuesta confiable"/aclaración/error/timeout, y contexto
+  conversacional (reenvía `session_id` en cada pregunta de seguimiento).
+- **Source Verification Panel (ID-HU-FE-002)**:
+  `frontend/src/components/SourceVerificationPanel.tsx` — se abre al hacer
+  clic en una citación; layout side-by-side con el chat. Muestra hoja/celda y,
+  si la celda citada es una sola (no un rango), su valor y fórmula en vivo;
+  para PDF intenta incrustar la página real del archivo original; banner de
+  advertencia con botón para cambiar a la versión vigente si el documento fue
+  superado; bloqueo con mensaje de permisos si está `restricted`; botón para
+  abrir el archivo original.
 
 ## Probar con un PDF de ejemplo
 
@@ -171,6 +225,8 @@ O usa cualquier `.xlsx` propio arrastrándolo en `http://localhost:8000/docs` (e
 
 ## Tests
 
+Backend:
+
 ```bash
 docker compose exec api pytest
 ```
@@ -184,14 +240,37 @@ docker compose exec api pytest
   necesitan Postgres/pgvector accesible (se saltan automáticamente si no lo está)
   y usan un proveedor de embeddings falso y determinista (en `tests/conftest.py`)
   para no depender de una API externa ni descargar modelos.
+- `test_qa_generation.py` prueba el pipeline LangGraph de generación de
+  respuestas (`qa/graph.py`) con un chat model falso vía `monkeypatch` —
+  fundamentación, citas multi-documento, valores en conflicto.
+- `test_conversation.py` (integración, requiere Postgres) verifica que una
+  pregunta de seguimiento recibe el turno anterior como contexto en el prompt.
+- `test_document_resolution.py` (integración, requiere Postgres) cubre
+  ID-HU-FE-002: lectura de celda/fórmula, supersesión de versión, acceso
+  restringido y descarga del archivo original.
+
+Frontend:
+
+```bash
+docker compose exec frontend npm test
+```
+
+Vitest + React Testing Library. Cubre `ChatInput`, `CitationBadge`,
+`AnswerMessage` (estados fundamentado/sin respuesta/aclaración/conflicto),
+`Chat` (flujo completo con la API mockeada, incluido el manejo de errores de
+red) y `SourceVerificationPanel` (celda con fórmula, rango multi-celda,
+versión superada, acceso restringido).
 
 ## Estructura
 
 ```
 backend/app/
   config.py               # settings desde .env (incluye toda la config de OCR)
-  db/models.py             # Document, Sheet, Cell, NamedRange, PdfTable, PdfReference, Chunk
-  schemas.py                # DTOs Pydantic de la API (incluye PdfStructureResponse)
+  storage.py                # persistencia de archivos originales en disco
+  db/models.py             # Document, Sheet, Cell, NamedRange, PdfTable, PdfReference, Chunk,
+                            # ConversationSession, ConversationMessage
+  schemas.py                # DTOs Pydantic de la API (incluye PdfStructureResponse, AnswerResponse,
+                             # DocumentResolutionOut, CellOut)
   ingestion/
     excel_parser.py          # extracción con openpyxl
     pdf_parser.py              # texto nativo (pypdf) + OCR fallback (PyMuPDF/Tesseract),
@@ -201,7 +280,24 @@ backend/app/
     service.py                     # orquesta parseo -> persistencia -> embeddings
   embeddings/                # proveedor intercambiable (openai / local)
   retrieval/                  # búsqueda por similitud en pgvector
+  qa/
+    graph.py                   # pipeline LangGraph: generate -> ground_and_validate
+    prompts.py                   # system prompt + construcción del prompt (incluye historial)
+    conversation.py                # sesión/historial de conversación (ID-HU-FE-001)
+    service.py                       # orquesta retrieval -> QA graph -> persistencia del turno
   api/
     routes_ingest.py           # POST /ingest
-    routes_query.py              # POST /query, GET /documents/{id}/pdf-structure
+    routes_query.py              # POST /query, POST /query/answer, GET /documents/{id}/pdf-structure
+    routes_documents.py            # GET /documents/{id}/resolve, /cells/{sheet}/{address}, /file,
+                                    # POST /supersede, PATCH /confidentiality
+
+frontend/src/
+  api/
+    client.ts               # fetch wrappers + manejo de timeout/errores
+    types.ts                  # tipos espejo de los DTOs del backend
+  components/
+    Chat.tsx                 # ID-HU-FE-001: input, historial, estados de respuesta
+    AnswerMessage.tsx, CitationBadge.tsx, ChatInput.tsx
+    SourceVerificationPanel.tsx  # ID-HU-FE-002: visor side-by-side
+  App.tsx                   # layout: chat + panel de fuente
 ```

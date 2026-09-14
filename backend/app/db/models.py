@@ -44,6 +44,21 @@ class Document(Base):
     warnings: Mapped[list] = mapped_column(JSON, default=list)
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
+    # Minimal versioning (ID-HU-FE-002): set explicitly via POST /documents/{id}/supersede —
+    # ingestion has no automatic "same filename = new version" detection yet.
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True)
+    superseded_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("documents.id", ondelete="SET NULL"), nullable=True
+    )
+    # Minimal confidentiality tagging (ID-HU-FE-002): "public" or "restricted".
+    # Placeholder access model until the full access-control/roles story exists —
+    # enforced only via the X-User-Role header in routes_documents.py.
+    confidentiality_tag: Mapped[str] = mapped_column(String(32), default="public")
+    # Path to the original uploaded file on disk, set by routes_ingest.py after
+    # ingestion succeeds. Null if the file was never persisted (e.g. ingested
+    # before this existed, or ingestion failed before the copy step).
+    storage_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     sheets: Mapped[list["Sheet"]] = relationship(back_populates="document", cascade="all, delete-orphan")
     named_ranges: Mapped[list["NamedRange"]] = relationship(back_populates="document", cascade="all, delete-orphan")
     chunks: Mapped[list["Chunk"]] = relationship(back_populates="document", cascade="all, delete-orphan")
@@ -158,3 +173,37 @@ class Chunk(Base):
     document: Mapped["Document"] = relationship(back_populates="chunks")
     pdf_table: Mapped["PdfTable | None"] = relationship(back_populates="chunks")
     pdf_reference: Mapped["PdfReference | None"] = relationship(back_populates="chunks")
+
+
+class ConversationSession(Base):
+    """A chat session (ID-HU-FE-001): groups the question/answer turns that
+    should be kept as context for follow-up questions."""
+
+    __tablename__ = "conversation_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    messages: Mapped[list["ConversationMessage"]] = relationship(
+        back_populates="session",
+        cascade="all, delete-orphan",
+        order_by="ConversationMessage.created_at",
+    )
+
+
+class ConversationMessage(Base):
+    """One question/answer turn, kept so later turns in the same session can
+    be answered with the prior exchange as context."""
+
+    __tablename__ = "conversation_messages"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    session_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("conversation_sessions.id", ondelete="CASCADE"))
+    question: Mapped[str] = mapped_column(Text)
+    # Flattened statement text, for feeding back as history context — not the full AnswerResponse shape.
+    answer_text: Mapped[str] = mapped_column(Text)
+    citations: Mapped[list] = mapped_column(JSON, default=list)
+    grounded: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    session: Mapped["ConversationSession"] = relationship(back_populates="messages")

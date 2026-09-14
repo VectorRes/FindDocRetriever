@@ -27,6 +27,11 @@ Excel cells). Follow these rules strictly:
 6. If the sources do not contain enough information to answer the question \
    at all, set unsupported=true and leave statements empty rather than \
    guessing.
+7. You may be given CONVERSATION HISTORY from earlier turns. Use it only to \
+   interpret the current QUESTION — e.g. resolving "it", "that", or an \
+   implicit follow-up like "and last quarter?". Never treat a fact stated in \
+   the history as a citable source: every statement must still be grounded \
+   in SOURCES.
 """
 
 
@@ -47,8 +52,19 @@ def _describe_location(chunk: RetrievedChunk) -> str:
     return ", ".join(parts)
 
 
-def build_user_prompt(question: str, source_map: dict[str, RetrievedChunk]) -> str:
-    lines = [f"QUESTION: {question}", "", "SOURCES:"]
+def build_user_prompt(
+    question: str,
+    source_map: dict[str, RetrievedChunk],
+    history: list[tuple[str, str]] | None = None,
+) -> str:
+    lines: list[str] = []
+    if history:
+        lines.append("CONVERSATION HISTORY (context only — do not cite as a source):")
+        for prior_question, prior_answer in history:
+            lines.append(f"Q: {prior_question}")
+            lines.append(f"A: {prior_answer}")
+        lines.append("")
+    lines += [f"QUESTION: {question}", "", "SOURCES:"]
     for source_id, chunk in source_map.items():
         lines.append(f"[{source_id}] ({_describe_location(chunk)})")
         lines.append(chunk.text.strip())

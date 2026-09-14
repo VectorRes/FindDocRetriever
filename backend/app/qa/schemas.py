@@ -92,3 +92,11 @@ class GroundedAnswer:
     # False when nothing could be safely grounded — no retrieved sources, or the
     # model's statements were all dropped for lacking a valid citation.
     grounded: bool = False
+    # The conversation this turn was recorded under (ID-HU-FE-001 follow-up
+    # context) — set by qa/service.answer_question once the turn is persisted.
+    session_id: str | None = None
+    # Forward-compatible contract for ID-HU-BE-009 (ambiguous-question
+    # clarification, implemented separately): always False/None until that
+    # detection logic lands, so the frontend can build against this shape now.
+    needs_clarification: bool = False
+    clarification_question: str | None = None
