@@ -56,6 +56,14 @@ export function listDocuments(): Promise<DocumentListOut> {
   return getJson(`/documents`);
 }
 
+export async function deleteDocument(documentId: string): Promise<void> {
+  const res = await fetch(`${API_URL}/documents/${documentId}`, { method: "DELETE" });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new ApiError(detail || `Delete failed with status ${res.status}`, "http", res.status);
+  }
+}
+
 export async function uploadDocument(file: File): Promise<DocumentOut> {
   const body = new FormData();
   body.append("file", file);

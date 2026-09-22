@@ -11,12 +11,15 @@ import pytest
 from fastapi import HTTPException
 
 from app.api.routes_documents import (
+    delete_document,
     get_cell,
     get_document_file,
+    list_documents,
     resolve_document,
     set_confidentiality,
     supersede_document,
 )
+from app.db.models import Document
 from app.ingestion.service import ingest_excel_file
 from app.schemas import ConfidentialityRequest, SupersedeRequest
 from app.storage import save_document_file
@@ -148,6 +151,48 @@ def test_restricted_document_denies_analyst_but_allows_admin(tmp_path, db_sessio
         with pytest.raises(HTTPException) as exc_info:
             get_cell(str(document.id), "FCF", "B2", x_user_role="analyst", db=db_session)
         assert exc_info.value.status_code == 403
+    finally:
+        db_session.delete(document)
+        db_session.commit()
+
+
+def test_delete_document_removes_it_and_nulls_out_dangling_supersession(tmp_path, db_session):
+    old_path = _make_workbook(tmp_path, "budget_v5.xlsx")
+    new_path = _make_workbook(tmp_path, "budget_v6.xlsx")
+    old_doc = ingest_excel_file(db_session, filename="budget_v5.xlsx", file_path=old_path)
+    new_doc = ingest_excel_file(db_session, filename="budget_v6.xlsx", file_path=new_path)
+    supersede_document(str(old_doc.id), SupersedeRequest(new_document_id=new_doc.id), db=db_session)
+    old_id = old_doc.id
+    new_id = new_doc.id
+
+    try:
+        delete_document(str(new_id), db=db_session)
+
+        assert db_session.get(Document, new_id) is None
+        db_session.refresh(old_doc)
+        assert old_doc.superseded_by_id is None
+
+        with pytest.raises(HTTPException) as exc_info:
+            resolve_document(str(new_id), db=db_session)
+        assert exc_info.value.status_code == 404
+    finally:
+        db_session.delete(old_doc)
+        db_session.commit()
+
+
+def test_delete_document_unknown_id_404s(db_session):
+    with pytest.raises(HTTPException) as exc_info:
+        delete_document("00000000-0000-0000-0000-000000000000", db=db_session)
+    assert exc_info.value.status_code == 404
+
+
+def test_list_documents_includes_sheet_names(tmp_path, db_session):
+    file_path = _make_workbook(tmp_path, "model6.xlsx")
+    document = ingest_excel_file(db_session, filename="model6.xlsx", file_path=file_path)
+    try:
+        result = list_documents(db=db_session)
+        listed = next(doc for doc in result.documents if doc.id == document.id)
+        assert listed.sheet_names == ["FCF"]
     finally:
         db_session.delete(document)
         db_session.commit()

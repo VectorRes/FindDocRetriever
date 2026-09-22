@@ -1,7 +1,8 @@
 import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import DocumentList from "./DocumentList";
-import { listDocuments } from "../api/client";
+import { deleteDocument, listDocuments } from "../api/client";
 import type { DocumentOut } from "../api/types";
 
 vi.mock("../api/client", async () => {
@@ -9,10 +10,12 @@ vi.mock("../api/client", async () => {
   return {
     ...actual,
     listDocuments: vi.fn(),
+    deleteDocument: vi.fn(),
   };
 });
 
 const mockedListDocuments = vi.mocked(listDocuments);
+const mockedDeleteDocument = vi.mocked(deleteDocument);
 
 function makeDocument(overrides: Partial<DocumentOut> = {}): DocumentOut {
   return {
@@ -34,18 +37,25 @@ function makeDocument(overrides: Partial<DocumentOut> = {}): DocumentOut {
 describe("DocumentList", () => {
   beforeEach(() => {
     mockedListDocuments.mockReset();
+    mockedDeleteDocument.mockReset();
   });
 
-  it("shows detected sheets and warnings for a ready Excel document", async () => {
+  it("renders nothing when closed", () => {
+    render(<DocumentList open={false} onClose={vi.fn()} />);
+    expect(screen.queryByText("Documents")).not.toBeInTheDocument();
+    expect(mockedListDocuments).not.toHaveBeenCalled();
+  });
+
+  it("shows detected sheets and warnings for a ready Excel document when opened", async () => {
     mockedListDocuments.mockResolvedValueOnce({
       documents: [makeDocument({ warnings: ["Unresolved formula in B7"] })],
     });
 
-    render(<DocumentList />);
+    render(<DocumentList open={true} onClose={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByText("budget.xlsx")).toBeInTheDocument());
     expect(screen.getByText(/Assumptions, FCF/)).toBeInTheDocument();
-    expect(screen.getByText("Unresolved formula in B7")).toBeInTheDocument();
+    expect(screen.getByText(/1 parsing warning/i)).toBeInTheDocument();
     expect(screen.getByText("ready")).toBeInTheDocument();
   });
 
@@ -59,7 +69,7 @@ describe("DocumentList", () => {
     });
     mockedListDocuments.mockResolvedValueOnce({ documents: [old, current] });
 
-    render(<DocumentList />);
+    render(<DocumentList open={true} onClose={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByText("superseded")).toBeInTheDocument());
     expect(screen.getByText(/superseded by/i)).toBeInTheDocument();
@@ -78,7 +88,7 @@ describe("DocumentList", () => {
       ],
     });
 
-    render(<DocumentList />);
+    render(<DocumentList open={true} onClose={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByText("failed")).toBeInTheDocument());
     expect(screen.getByText(/corrupted file/i)).toBeInTheDocument();
@@ -87,8 +97,40 @@ describe("DocumentList", () => {
   it("shows an empty state when there are no documents", async () => {
     mockedListDocuments.mockResolvedValueOnce({ documents: [] });
 
-    render(<DocumentList />);
+    render(<DocumentList open={true} onClose={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByText(/no documents uploaded yet/i)).toBeInTheDocument());
+  });
+
+  it("deletes a document after confirming, then refreshes the list", async () => {
+    const user = userEvent.setup();
+    mockedListDocuments.mockResolvedValueOnce({ documents: [makeDocument()] });
+    mockedDeleteDocument.mockResolvedValueOnce(undefined);
+    mockedListDocuments.mockResolvedValueOnce({ documents: [] });
+
+    render(<DocumentList open={true} onClose={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByText("budget.xlsx")).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: /^delete$/i }));
+    expect(screen.getByText(/delete this document\?/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /yes, delete/i }));
+
+    await waitFor(() => expect(mockedDeleteDocument).toHaveBeenCalledWith("doc-1"));
+    await waitFor(() => expect(screen.getByText(/no documents uploaded yet/i)).toBeInTheDocument());
+  });
+
+  it("cancels a pending delete without calling the API", async () => {
+    const user = userEvent.setup();
+    mockedListDocuments.mockResolvedValueOnce({ documents: [makeDocument()] });
+
+    render(<DocumentList open={true} onClose={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByText("budget.xlsx")).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: /^delete$/i }));
+    await user.click(screen.getByRole("button", { name: /cancel/i }));
+
+    expect(screen.queryByText(/delete this document\?/i)).not.toBeInTheDocument();
+    expect(mockedDeleteDocument).not.toHaveBeenCalled();
   });
 });

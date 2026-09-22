@@ -24,3 +24,11 @@ def save_document_file(document_id: uuid.UUID, suffix: str, tmp_path: Path) -> s
 
 def get_document_file_path(storage_path: str) -> Path:
     return Path(storage_path)
+
+
+def delete_document_file(storage_path: str | None) -> None:
+    """Best-effort removal of a document's stored bytes — missing files are
+    not an error, since a delete should still succeed and clean up the DB row."""
+    if storage_path is None:
+        return
+    Path(storage_path).unlink(missing_ok=True)
