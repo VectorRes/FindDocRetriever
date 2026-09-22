@@ -43,6 +43,11 @@ export interface DocumentOut {
   is_current: boolean;
   superseded_by_id: string | null;
   confidentiality_tag: string;
+  sheet_names: string[];
+}
+
+export interface DocumentListOut {
+  documents: DocumentOut[];
 }
 
 export interface AccessDecision {

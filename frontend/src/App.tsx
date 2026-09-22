@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { getHealth } from "./api/client";
 import type { CitationOut } from "./api/types";
 import Chat from "./components/Chat";
+import DocumentList from "./components/DocumentList";
 import SourceVerificationPanel from "./components/SourceVerificationPanel";
 
 type ApiStatus = "checking" | "online" | "offline";
@@ -33,6 +34,7 @@ export default function App() {
         </span>
       </header>
       <div style={{ maxWidth: "72rem", margin: "0 auto", display: "flex", gap: "1.5rem", alignItems: "flex-start" }}>
+        <DocumentList />
         <Chat onCitationClick={setSelectedCitation} />
         {selectedCitation && (
           <SourceVerificationPanel

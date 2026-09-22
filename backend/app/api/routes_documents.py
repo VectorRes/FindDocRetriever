@@ -21,6 +21,7 @@ from app.schemas import (
     AccessDecision,
     CellOut,
     ConfidentialityRequest,
+    DocumentListOut,
     DocumentOut,
     DocumentResolutionOut,
     SupersedeRequest,
@@ -28,6 +29,14 @@ from app.schemas import (
 from app.storage import get_document_file_path
 
 router = APIRouter()
+
+
+@router.get("/documents", response_model=DocumentListOut)
+def list_documents(db: Session = Depends(get_db)) -> DocumentListOut:
+    """Backs ID-HU-FE-005's upload/status list: every document with its
+    processing status, version links, and (for Excel) detected sheets."""
+    documents = db.scalars(select(Document).order_by(Document.uploaded_at.desc())).all()
+    return DocumentListOut(documents=list(documents))
 
 ADMIN_ROLE = "admin"
 CONFIDENTIALITY_TAGS = {"public", "restricted"}

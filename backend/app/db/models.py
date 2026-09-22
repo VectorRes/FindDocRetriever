@@ -65,6 +65,11 @@ class Document(Base):
     pdf_tables: Mapped[list["PdfTable"]] = relationship(back_populates="document", cascade="all, delete-orphan")
     pdf_references: Mapped[list["PdfReference"]] = relationship(back_populates="document", cascade="all, delete-orphan")
 
+    @property
+    def sheet_names(self) -> list[str]:
+        """Sheets detected during ingestion (ID-HU-FE-005's parsing summary)."""
+        return [sheet.name for sheet in self.sheets]
+
 
 class Sheet(Base):
     __tablename__ = "sheets"
