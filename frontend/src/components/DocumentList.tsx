@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ApiError, deleteDocument, listDocuments } from "../api/client";
+import { ApiError, deleteDocument, listDocuments, setDocumentConfidentiality } from "../api/client";
 import type { DocumentOut } from "../api/types";
 import DocumentUpload from "./DocumentUpload";
 
@@ -10,17 +10,37 @@ const STATUS_STYLES: Record<string, { background: string; color: string }> = {
   failed: { background: "#fef2f2", color: "#b91c1c" },
 };
 
+// Tags accepted by the backend's normalize_tag (app/retrieval/access.py).
+const CONFIDENTIALITY_OPTIONS = [
+  "public",
+  "internal",
+  "restricted",
+  "restricted:compensation",
+  "restricted:related-parties",
+  "restricted:legal",
+];
+
+function confidentialityStyle(tag: string): { background: string; color: string } {
+  if (tag === "public") return { background: "#f0fdf4", color: "#15803d" };
+  if (tag === "internal") return { background: "#eff6ff", color: "#1d4ed8" };
+  return { background: "#fef3c7", color: "#92400e" };
+}
+
 interface DocumentListProps {
   open: boolean;
   onClose: () => void;
+  // Whether the current role may reclassify documents (see CLASSIFIER_ROLES).
+  canClassify?: boolean;
 }
 
-export default function DocumentList({ open, onClose }: DocumentListProps) {
+export default function DocumentList({ open, onClose, canClassify = false }: DocumentListProps) {
   const [documents, setDocuments] = useState<DocumentOut[]>([]);
   const [status, setStatus] = useState<"loading" | "done" | "error">("loading");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [classifyingId, setClassifyingId] = useState<string | null>(null);
+  const [classifyError, setClassifyError] = useState<{ id: string; message: string } | null>(null);
 
   function refresh() {
     setStatus("loading");
@@ -52,6 +72,22 @@ export default function DocumentList({ open, onClose }: DocumentListProps) {
     }
   }
 
+  async function changeConfidentiality(documentId: string, tag: string) {
+    setClassifyingId(documentId);
+    setClassifyError(null);
+    try {
+      const updated = await setDocumentConfidentiality(documentId, tag);
+      setDocuments((prev) => prev.map((doc) => (doc.id === documentId ? updated : doc)));
+    } catch (err) {
+      setClassifyError({
+        id: documentId,
+        message: err instanceof ApiError ? err.message : "Could not update the classification.",
+      });
+    } finally {
+      setClassifyingId(null);
+    }
+  }
+
   function byId(id: string | null): DocumentOut | undefined {
     return id ? documents.find((doc) => doc.id === id) : undefined;
   }
@@ -70,6 +106,10 @@ export default function DocumentList({ open, onClose }: DocumentListProps) {
         </div>
 
         <DocumentUpload onUploaded={refresh} />
+        <p style={{ margin: "0.4rem 0 0", fontSize: "0.75rem", color: "#64748b" }}>
+          New uploads are <strong>restricted</strong> by default and won't be used to answer
+          questions for roles without access until they're reclassified.
+        </p>
 
         <div style={{ marginTop: "1rem", display: "flex", flexDirection: "column", gap: "0.6rem" }}>
           {status === "loading" && documents.length === 0 && (
@@ -96,10 +136,35 @@ export default function DocumentList({ open, onClose }: DocumentListProps) {
                   <span style={{ ...badgeStyle, ...(doc.is_current ? currentBadgeStyle : supersededBadgeStyle) }}>
                     {doc.is_current ? "current version" : "superseded"}
                   </span>
-                  {doc.confidentiality_tag === "restricted" && (
-                    <span style={{ ...badgeStyle, background: "#fef3c7", color: "#92400e" }}>restricted</span>
-                  )}
+                  <span style={{ ...badgeStyle, ...confidentialityStyle(doc.confidentiality_tag) }}>
+                    {doc.confidentiality_tag}
+                  </span>
                 </div>
+
+                {canClassify && (
+                  <label style={{ fontSize: "0.8rem", color: "#334155", display: "flex", gap: "0.4rem", alignItems: "center" }}>
+                    Classification
+                    <select
+                      value={doc.confidentiality_tag}
+                      onChange={(e) => changeConfidentiality(doc.id, e.target.value)}
+                      disabled={classifyingId === doc.id}
+                      aria-label={`Classification for ${doc.filename}`}
+                      style={selectStyle}
+                    >
+                      {(CONFIDENTIALITY_OPTIONS.includes(doc.confidentiality_tag)
+                        ? CONFIDENTIALITY_OPTIONS
+                        : [doc.confidentiality_tag, ...CONFIDENTIALITY_OPTIONS]
+                      ).map((tag) => (
+                        <option key={tag} value={tag}>
+                          {tag}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                {classifyError?.id === doc.id && (
+                  <div style={{ fontSize: "0.8rem", color: "#b91c1c" }}>{classifyError.message}</div>
+                )}
 
                 {!doc.is_current && supersededBy && (
                   <div style={{ fontSize: "0.8rem", color: "#64748b" }}>
@@ -225,6 +290,13 @@ const warningsListStyle = {
   paddingLeft: "1.1rem",
   fontSize: "0.78rem",
   color: "#b45309",
+};
+
+const selectStyle = {
+  padding: "0.15rem 0.3rem",
+  borderRadius: "0.35rem",
+  border: "1px solid #cbd5e1",
+  fontSize: "0.78rem",
 };
 
 const deleteButtonStyle = {

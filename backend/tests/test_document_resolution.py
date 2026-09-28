@@ -146,6 +146,11 @@ def test_get_document_file_denies_restricted_document(tmp_path, db_session):
         with pytest.raises(HTTPException) as exc_info:
             get_document_file(str(document.id), x_user_role="analyst", db=db_session)
         assert exc_info.value.status_code == 403
+
+        # The ?role= query param (used by iframes/links) grants the same access
+        # as the header would.
+        response = get_document_file(str(document.id), role="admin", db=db_session)
+        assert response.path.exists()
     finally:
         db_session.delete(document)
         db_session.commit()

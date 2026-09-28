@@ -13,6 +13,8 @@ export interface StatementOut {
   text: string;
   citations: CitationOut[];
   conflicting: boolean;
+  // True for the backend's uncited "some information is restricted" notice.
+  notice?: boolean;
 }
 
 export interface AnswerResponse {
@@ -24,6 +26,8 @@ export interface AnswerResponse {
   session_id: string;
   needs_clarification: boolean;
   clarification_question: string | null;
+  // Set when relevant sources exist that the current role can't access.
+  restriction_notice?: string | null;
 }
 
 export interface QueryRequest {

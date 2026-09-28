@@ -17,7 +17,20 @@ export default function AnswerMessage({ answer, onCitationClick }: AnswerMessage
     );
   }
 
-  if (!answer.grounded || answer.statements.length === 0) {
+  // The backend appends the restriction notice as an uncited statement; show it
+  // as a banner instead so it isn't mistaken for a document-backed fact.
+  const statements = answer.statements.filter((statement) => !statement.notice);
+  const restrictionBanner = answer.restriction_notice ? (
+    <div style={{ ...bannerStyle("#fef3c7", "#92400e"), marginBottom: "0.5rem" }}>
+      🔒 {answer.restriction_notice}
+    </div>
+  ) : null;
+
+  if (statements.length === 0 && restrictionBanner) {
+    return restrictionBanner;
+  }
+
+  if (!answer.grounded || statements.length === 0) {
     return (
       <div style={bannerStyle("#fef2f2", "#b91c1c")}>
         I couldn't find a reliable answer to that in the indexed documents.
@@ -28,12 +41,13 @@ export default function AnswerMessage({ answer, onCitationClick }: AnswerMessage
 
   return (
     <div>
+      {restrictionBanner}
       {answer.has_conflicts && (
         <div style={{ ...bannerStyle("#fff7ed", "#c2410c"), marginBottom: "0.5rem" }}>
           Sources disagree on this — both values are shown below with their own citations.
         </div>
       )}
-      {answer.statements.map((statement, i) => (
+      {statements.map((statement, i) => (
         <p key={i} style={{ margin: "0.35rem 0" }}>
           {statement.text}
           {statement.citations.map((citation, j) => (

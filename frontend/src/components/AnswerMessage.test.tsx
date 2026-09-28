@@ -77,4 +77,42 @@ describe("AnswerMessage", () => {
     );
     expect(screen.getByText(/sources disagree/i)).toBeInTheDocument();
   });
+
+  const notice = "Part of the relevant information is restricted and was excluded from this answer.";
+
+  it("shows the restriction notice as a banner, not as a statement, alongside the answer", () => {
+    render(
+      <AnswerMessage
+        answer={{
+          ...baseAnswer,
+          grounded: true,
+          restriction_notice: notice,
+          statements: [
+            { text: "Q3 revenue was 100.", citations: [citation], conflicting: false },
+            { text: notice, citations: [], conflicting: false, notice: true },
+          ],
+        }}
+        onCitationClick={vi.fn()}
+      />
+    );
+    expect(screen.getByText("Q3 revenue was 100.")).toBeInTheDocument();
+    // Rendered exactly once — in the banner, not repeated as a statement.
+    expect(screen.getAllByText(new RegExp(notice))).toHaveLength(1);
+  });
+
+  it("shows only the restriction notice when every relevant source was restricted", () => {
+    render(
+      <AnswerMessage
+        answer={{
+          ...baseAnswer,
+          grounded: true,
+          restriction_notice: notice,
+          statements: [{ text: notice, citations: [], conflicting: false, notice: true }],
+        }}
+        onCitationClick={vi.fn()}
+      />
+    );
+    expect(screen.getByText(new RegExp(notice))).toBeInTheDocument();
+    expect(screen.queryByText(/couldn't find a reliable answer/i)).not.toBeInTheDocument();
+  });
 });

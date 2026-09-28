@@ -104,6 +104,9 @@ class StatementOut(BaseModel):
     text: str
     citations: list[CitationOut]
     conflicting: bool
+    # True for the uncited restriction notice appended by the QA graph, so the
+    # UI can render it as a notice rather than as a document-backed statement.
+    notice: bool = False
 
 
 class AnswerResponse(BaseModel):

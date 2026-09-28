@@ -11,7 +11,7 @@ FE-002 UI, not a real security boundary.
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -135,13 +135,17 @@ def get_cell(
 def get_document_file(
     document_id: str,
     x_user_role: Annotated[str, Header(alias="X-User-Role")] = "analyst",
+    role: Annotated[str | None, Query()] = None,
     db: Session = Depends(get_db),
 ) -> FileResponse:
     """Serves the original uploaded file — ID-HU-FE-002's "open original file"
-    action, and what the PDF viewer embeds to show the real page."""
+    action, and what the PDF viewer embeds to show the real page.
+
+    `?role=` is accepted as an alternative to X-User-Role because the browser
+    loads this URL directly (iframe / link), which can't carry custom headers."""
     document = _get_document_or_404(db, document_id)
 
-    access = _check_access(document, x_user_role)
+    access = _check_access(document, role or x_user_role)
     if not access.allowed:
         raise HTTPException(status_code=403, detail=access.reason)
 

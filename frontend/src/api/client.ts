@@ -10,6 +10,52 @@ import type {
 const API_URL = import.meta.env.VITE_API_URL;
 const ANSWER_TIMEOUT_MS = 30_000;
 
+// Roles understood by the backend's access policy (app/retrieval/access.py).
+// There's no auth yet: the chosen role is sent as X-User-Role and taken at
+// face value by the API.
+export const USER_ROLES = [
+  "analyst",
+  "reviewer",
+  "financial-controller",
+  "restricted-reviewer",
+  "admin",
+] as const;
+export type UserRole = (typeof USER_ROLES)[number];
+
+// Roles allowed to reclassify documents in the UI. The backend doesn't
+// enforce this yet — it's a UI-level guard until real auth exists.
+export const CLASSIFIER_ROLES: readonly UserRole[] = ["reviewer", "restricted-reviewer", "admin"];
+
+const ROLE_STORAGE_KEY = "findoc.userRole";
+let currentRole: UserRole = readStoredRole();
+
+function readStoredRole(): UserRole {
+  try {
+    const stored = localStorage.getItem(ROLE_STORAGE_KEY);
+    if (stored && (USER_ROLES as readonly string[]).includes(stored)) return stored as UserRole;
+  } catch {
+    // Storage can be unavailable (private mode, tests) — fall back to the default.
+  }
+  return "analyst";
+}
+
+export function getUserRole(): UserRole {
+  return currentRole;
+}
+
+export function setUserRole(role: UserRole): void {
+  currentRole = role;
+  try {
+    localStorage.setItem(ROLE_STORAGE_KEY, role);
+  } catch {
+    // Not persisting the choice is fine; it still applies for this session.
+  }
+}
+
+function roleHeaders(): Record<string, string> {
+  return { "X-User-Role": currentRole };
+}
+
 export class ApiError extends Error {
   kind: "timeout" | "http" | "network";
   status?: number;
@@ -30,7 +76,7 @@ export async function getHealth(): Promise<{ status: string }> {
 }
 
 async function getJson<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_URL}${path}`);
+  const res = await fetch(`${API_URL}${path}`, { headers: roleHeaders() });
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
     throw new ApiError(detail || `Request failed with status ${res.status}`, "http", res.status);
@@ -48,8 +94,10 @@ export function getCell(documentId: string, sheetName: string, address: string):
   );
 }
 
+// Loaded directly by the browser (iframe / link), so the role goes in the
+// query string instead of a header.
 export function documentFileUrl(documentId: string): string {
-  return `${API_URL}/documents/${documentId}/file`;
+  return `${API_URL}/documents/${documentId}/file?role=${encodeURIComponent(currentRole)}`;
 }
 
 export function listDocuments(): Promise<DocumentListOut> {
@@ -57,11 +105,27 @@ export function listDocuments(): Promise<DocumentListOut> {
 }
 
 export async function deleteDocument(documentId: string): Promise<void> {
-  const res = await fetch(`${API_URL}/documents/${documentId}`, { method: "DELETE" });
+  const res = await fetch(`${API_URL}/documents/${documentId}`, {
+    method: "DELETE",
+    headers: roleHeaders(),
+  });
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
     throw new ApiError(detail || `Delete failed with status ${res.status}`, "http", res.status);
   }
+}
+
+export async function setDocumentConfidentiality(documentId: string, tag: string): Promise<DocumentOut> {
+  const res = await fetch(`${API_URL}/documents/${documentId}/confidentiality`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", ...roleHeaders() },
+    body: JSON.stringify({ tag }),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new ApiError(detail || `Update failed with status ${res.status}`, "http", res.status);
+  }
+  return (await res.json()) as DocumentOut;
 }
 
 export async function uploadDocument(file: File): Promise<DocumentOut> {
@@ -70,7 +134,7 @@ export async function uploadDocument(file: File): Promise<DocumentOut> {
 
   let res: Response;
   try {
-    res = await fetch(`${API_URL}/ingest`, { method: "POST", body });
+    res = await fetch(`${API_URL}/ingest`, { method: "POST", body, headers: roleHeaders() });
   } catch {
     throw new ApiError("Could not reach the FinDoc Retriever API.", "network");
   }
@@ -90,7 +154,7 @@ export async function postQueryAnswer(request: QueryRequest): Promise<AnswerResp
   try {
     const res = await fetch(`${API_URL}/query/answer`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...roleHeaders() },
       body: JSON.stringify(request),
       signal: controller.signal,
     });

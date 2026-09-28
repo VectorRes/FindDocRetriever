@@ -2,7 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import DocumentList from "./DocumentList";
-import { deleteDocument, listDocuments } from "../api/client";
+import { deleteDocument, listDocuments, setDocumentConfidentiality } from "../api/client";
 import type { DocumentOut } from "../api/types";
 
 vi.mock("../api/client", async () => {
@@ -11,11 +11,13 @@ vi.mock("../api/client", async () => {
     ...actual,
     listDocuments: vi.fn(),
     deleteDocument: vi.fn(),
+    setDocumentConfidentiality: vi.fn(),
   };
 });
 
 const mockedListDocuments = vi.mocked(listDocuments);
 const mockedDeleteDocument = vi.mocked(deleteDocument);
+const mockedSetConfidentiality = vi.mocked(setDocumentConfidentiality);
 
 function makeDocument(overrides: Partial<DocumentOut> = {}): DocumentOut {
   return {
@@ -38,6 +40,7 @@ describe("DocumentList", () => {
   beforeEach(() => {
     mockedListDocuments.mockReset();
     mockedDeleteDocument.mockReset();
+    mockedSetConfidentiality.mockReset();
   });
 
   it("renders nothing when closed", () => {
@@ -132,5 +135,31 @@ describe("DocumentList", () => {
 
     expect(screen.queryByText(/delete this document\?/i)).not.toBeInTheDocument();
     expect(mockedDeleteDocument).not.toHaveBeenCalled();
+  });
+  it("shows the confidentiality tag but no classification control for non-classifier roles", async () => {
+    mockedListDocuments.mockResolvedValueOnce({
+      documents: [makeDocument({ confidentiality_tag: "restricted:compensation" })],
+    });
+
+    render(<DocumentList open={true} onClose={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByText("restricted:compensation")).toBeInTheDocument());
+    expect(screen.queryByRole("combobox", { name: /classification/i })).not.toBeInTheDocument();
+  });
+
+  it("lets a classifier role reclassify a document and shows the updated tag", async () => {
+    const user = userEvent.setup();
+    mockedListDocuments.mockResolvedValueOnce({
+      documents: [makeDocument({ confidentiality_tag: "restricted" })],
+    });
+    mockedSetConfidentiality.mockResolvedValueOnce(makeDocument({ confidentiality_tag: "internal" }));
+
+    render(<DocumentList open={true} onClose={vi.fn()} canClassify />);
+
+    const select = await screen.findByRole("combobox", { name: /classification for budget\.xlsx/i });
+    await user.selectOptions(select, "internal");
+
+    await waitFor(() => expect(mockedSetConfidentiality).toHaveBeenCalledWith("doc-1", "internal"));
+    await waitFor(() => expect(select).toHaveValue("internal"));
   });
 });
