@@ -17,6 +17,13 @@ class DocumentOut(BaseModel):
     is_current: bool
     superseded_by_id: UUID | None
     confidentiality_tag: str
+    # Sheet names detected during Excel ingestion (ID-HU-FE-005's "parsing
+    # summary"); always empty for PDFs.
+    sheet_names: list[str] = []
+
+
+class DocumentListOut(BaseModel):
+    documents: list[DocumentOut]
 
 
 class QueryRequest(BaseModel):

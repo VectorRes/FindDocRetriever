@@ -22,16 +22,37 @@ from app.schemas import (
     AccessDecision,
     CellOut,
     ConfidentialityRequest,
+    DocumentListOut,
     DocumentOut,
     DocumentResolutionOut,
     SupersedeRequest,
 )
-from app.storage import get_document_file_path
+from app.storage import delete_document_file, get_document_file_path
 from app.retrieval.access import can_access, normalize_tag, parse_roles
 
 router = APIRouter()
 
 CONFIDENTIALITY_TAGS = {"public", "internal", "restricted"}
+
+
+@router.get("/documents", response_model=DocumentListOut)
+def list_documents(db: Session = Depends(get_db)) -> DocumentListOut:
+    """Backs ID-HU-FE-005's upload/status list: every document with its
+    processing status, version links, and (for Excel) detected sheets."""
+    documents = db.scalars(select(Document).order_by(Document.uploaded_at.desc())).all()
+    return DocumentListOut(documents=list(documents))
+
+
+@router.delete("/documents/{document_id}", status_code=204)
+def delete_document(document_id: str, db: Session = Depends(get_db)) -> None:
+    """Removes a document (ID-HU-FE-005: undoing an accidental upload).
+    Cascades to its sheets/cells/chunks/PDF tables; any document that names
+    this one as its superseded_by_id falls back to null (ON DELETE SET NULL)
+    rather than pointing at a deleted row."""
+    document = _get_document_or_404(db, document_id)
+    delete_document_file(document.storage_path)
+    db.delete(document)
+    db.commit()
 
 
 def _get_document_or_404(db: Session, document_id: str) -> Document:

@@ -1,4 +1,11 @@
-import type { AnswerResponse, CellOut, DocumentResolutionOut, QueryRequest } from "./types";
+import type {
+  AnswerResponse,
+  CellOut,
+  DocumentListOut,
+  DocumentOut,
+  DocumentResolutionOut,
+  QueryRequest,
+} from "./types";
 
 const API_URL = import.meta.env.VITE_API_URL;
 const ANSWER_TIMEOUT_MS = 30_000;
@@ -43,6 +50,37 @@ export function getCell(documentId: string, sheetName: string, address: string):
 
 export function documentFileUrl(documentId: string): string {
   return `${API_URL}/documents/${documentId}/file`;
+}
+
+export function listDocuments(): Promise<DocumentListOut> {
+  return getJson(`/documents`);
+}
+
+export async function deleteDocument(documentId: string): Promise<void> {
+  const res = await fetch(`${API_URL}/documents/${documentId}`, { method: "DELETE" });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new ApiError(detail || `Delete failed with status ${res.status}`, "http", res.status);
+  }
+}
+
+export async function uploadDocument(file: File): Promise<DocumentOut> {
+  const body = new FormData();
+  body.append("file", file);
+
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}/ingest`, { method: "POST", body });
+  } catch {
+    throw new ApiError("Could not reach the FinDoc Retriever API.", "network");
+  }
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new ApiError(detail || `Upload failed with status ${res.status}`, "http", res.status);
+  }
+
+  return (await res.json()) as DocumentOut;
 }
 
 export async function postQueryAnswer(request: QueryRequest): Promise<AnswerResponse> {
