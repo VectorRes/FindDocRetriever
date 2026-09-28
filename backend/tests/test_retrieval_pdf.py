@@ -25,6 +25,10 @@ def test_ingest_and_query_round_trip(tmp_path, db_session):
     try:
         assert document.status == "ready"
         assert document.doc_type == "pdf"
+        document.confidentiality_tag = "public"
+        for chunk in document.chunks:
+            chunk.confidentiality_tag = "public"
+        db_session.commit()
 
         results = retrieve(db_session, question="What was Q3 revenue?", top_k=5)
 

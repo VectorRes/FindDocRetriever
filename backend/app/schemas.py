@@ -118,6 +118,7 @@ class AnswerResponse(BaseModel):
     # Set by ID-HU-BE-009 (implemented separately); always False/None for now.
     needs_clarification: bool = False
     clarification_question: str | None = None
+    restriction_notice: str | None = None
 
 
 class CellOut(BaseModel):

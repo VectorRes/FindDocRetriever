@@ -8,6 +8,7 @@ yet, so the caller's role is taken at face value from the X-User-Role header
 (confidentiality tiers, real roles/permissions) — good enough to unblock the
 FE-002 UI, not a real security boundary.
 """
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -15,7 +16,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import Cell, Document, Sheet
+from app.db.models import Cell, Chunk, Document, Sheet
 from app.db.session import get_db
 from app.schemas import (
     AccessDecision,
@@ -26,11 +27,11 @@ from app.schemas import (
     SupersedeRequest,
 )
 from app.storage import get_document_file_path
+from app.retrieval.access import can_access, normalize_tag, parse_roles
 
 router = APIRouter()
 
-ADMIN_ROLE = "admin"
-CONFIDENTIALITY_TAGS = {"public", "restricted"}
+CONFIDENTIALITY_TAGS = {"public", "internal", "restricted"}
 
 
 def _get_document_or_404(db: Session, document_id: str) -> Document:
@@ -46,18 +47,18 @@ def _get_document_or_404(db: Session, document_id: str) -> Document:
 
 
 def _check_access(document: Document, role: str) -> AccessDecision:
-    if document.confidentiality_tag == "public" or role == ADMIN_ROLE:
+    if can_access(document.confidentiality_tag, parse_roles(role)):
         return AccessDecision(allowed=True)
     return AccessDecision(
         allowed=False,
-        reason="This document is restricted. Elevated permissions are required to view it.",
+        reason="This content is restricted. The required permission is not assigned to this user.",
     )
 
 
 @router.get("/documents/{document_id}/resolve", response_model=DocumentResolutionOut)
 def resolve_document(
     document_id: str,
-    x_user_role: str = Header(default="analyst", alias="X-User-Role"),
+    x_user_role: Annotated[str, Header(alias="X-User-Role")] = "analyst",
     db: Session = Depends(get_db),
 ) -> DocumentResolutionOut:
     document = _get_document_or_404(db, document_id)
@@ -79,7 +80,7 @@ def get_cell(
     document_id: str,
     sheet_name: str,
     address: str,
-    x_user_role: str = Header(default="analyst", alias="X-User-Role"),
+    x_user_role: Annotated[str, Header(alias="X-User-Role")] = "analyst",
     db: Session = Depends(get_db),
 ) -> CellOut:
     document = _get_document_or_404(db, document_id)
@@ -112,7 +113,7 @@ def get_cell(
 @router.get("/documents/{document_id}/file")
 def get_document_file(
     document_id: str,
-    x_user_role: str = Header(default="analyst", alias="X-User-Role"),
+    x_user_role: Annotated[str, Header(alias="X-User-Role")] = "analyst",
     db: Session = Depends(get_db),
 ) -> FileResponse:
     """Serves the original uploaded file — ID-HU-FE-002's "open original file"
@@ -156,13 +157,47 @@ def supersede_document(
 def set_confidentiality(
     document_id: str, request: ConfidentialityRequest, db: Session = Depends(get_db)
 ) -> DocumentOut:
-    if request.tag not in CONFIDENTIALITY_TAGS:
-        raise HTTPException(
-            status_code=400, detail=f"tag must be one of {sorted(CONFIDENTIALITY_TAGS)}"
-        )
+    try:
+        tag = normalize_tag(request.tag)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     document = _get_document_or_404(db, document_id)
-    document.confidentiality_tag = request.tag
+    document.confidentiality_tag = tag
+    for chunk in document.chunks:
+        chunk.confidentiality_tag = tag
+
+    db.commit()
+    db.refresh(document)
+    return document
+
+
+@router.patch(
+    "/documents/{document_id}/chunks/{chunk_id}/confidentiality",
+    response_model=DocumentOut,
+)
+def set_chunk_confidentiality(
+    document_id: str,
+    chunk_id: str,
+    request: ConfidentialityRequest,
+    db: Session = Depends(get_db),
+) -> DocumentOut:
+    try:
+        tag = normalize_tag(request.tag)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    document = _get_document_or_404(db, document_id)
+    try:
+        chunk_uuid = UUID(chunk_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid chunk id") from exc
+
+    chunk = db.get(Chunk, chunk_uuid)
+    if chunk is None or chunk.document_id != document.id:
+        raise HTTPException(status_code=404, detail="Chunk not found")
+
+    chunk.confidentiality_tag = tag
     db.commit()
     db.refresh(document)
     return document

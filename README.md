@@ -102,7 +102,9 @@ momento de migrar). Para comparar `openai` vs `local`, lo más simple es usar ba
     cifrados (se intenta descifrar con contraseña vacía; si requiere contraseña
     real, se marca como `failed` con un warning explicativo y no se extrae nada).
 - `POST /query` — `{"question": "...", "top_k": <opcional>}` → chunks más
-  relevantes, cada uno con `document_filename` y, según el tipo de contenido,
+  relevantes. El backend aplica filtrado de confidencialidad antes del `LIMIT`;
+  el rol/permisos se recibe temporalmente mediante `X-User-Role` (puede contener
+  varios permisos separados por coma). cada uno con `document_filename` y, según el tipo de contenido,
   `sheet_name`+`cell_range` (Excel), `page_number` (PDF), `content_type`
   (`text`/`table_row`/`reference`), `reference_number` (para chunks de
   notas/secciones), y `extraction_method`/`confidence`/`confidence_label`
@@ -121,12 +123,35 @@ momento de migrar). Para comparar `openai` vs `local`, lo más simple es usar ba
   también `needs_clarification`/`clarification_question`, el contrato para
   ID-HU-BE-009 (detección de ambigüedad) — siempre `false`/`null` hasta que esa
   historia se implemente.
+### Confidentialidad y control de acceso
+
+Los documentos y chunks nuevos se clasifican como `restricted` por defecto.
+Las etiquetas soportadas son `public`, `internal`, `restricted` y
+`restricted:<categoria>` (por ejemplo `restricted:compensation`,
+`restricted:related-parties` o `restricted:legal-contingencies`).
+
+El permiso requerido para una etiqueta categorizada es `<categoria>-access`.
+Por ejemplo, `restricted:compensation` requiere `compensation-access`.
+`admin` tiene acceso a todos los niveles. Un analista normal puede consultar
+contenido `public` e `internal`, pero no contenido `restricted`.
+
+El filtrado se ejecuta en la capa de recuperación antes de entregar fuentes al
+modelo. Si una consulta tiene coincidencias relevantes que fueron excluidas por
+confidencialidad, `/query/answer` añade el aviso:
+`Part of the relevant information is restricted and was excluded from this answer.`
+
+Endpoints de clasificación:
+- `PATCH /documents/{document_id}/confidentiality` — clasifica el documento y
+  sus chunks actuales. Ejemplo: `{"tag": "internal"}` o
+  `{"tag": "restricted:compensation"}`.
+- `PATCH /documents/{document_id}/chunks/{chunk_id}/confidentiality` — permite
+  sobreescribir la clasificación de una sección/chunk individual.
+
 - `GET /documents/{document_id}/resolve` (ID-HU-FE-002) — antes de mostrar la
   fuente de una citación: si el documento fue superado por una versión más
   reciente (`is_superseded` + `current_version`) y si el usuario tiene acceso
   (`access.allowed`/`access.reason`, según `confidentiality_tag` y el header
-  `X-User-Role`, por defecto `analyst`; solo `admin` ve documentos
-  `restricted` — placeholder mínimo hasta que exista control de acceso real).
+  `X-User-Role` y la política de permisos de confidencialidad.
 - `GET /documents/{document_id}/cells/{sheet_name}/{address}` — valor, fórmula
   y `formula_references` de una celda citada. Respeta el mismo control de
   acceso que `/resolve`.
@@ -136,8 +161,6 @@ momento de migrar). Para comparar `openai` vs `local`, lo más simple es usar ba
 - `POST /documents/{document_id}/supersede` — `{"new_document_id": "..."}`,
   enlaza explícitamente una versión vieja con la nueva (no hay detección
   automática de "mismo nombre = nueva versión" al ingerir).
-- `PATCH /documents/{document_id}/confidentiality` — `{"tag": "public" |
-  "restricted"}`.
 - `GET /health` — chequeo básico.
 
 Documentación interactiva en `http://localhost:8000/docs`.
@@ -301,3 +324,18 @@ frontend/src/
     SourceVerificationPanel.tsx  # ID-HU-FE-002: visor side-by-side
   App.tsx                   # layout: chat + panel de fuente
 ```
+## Confidentiality authorization and audit (ID-HU-BE)
+
+Restricted retrieval is permission-aware and auditable. `X-User-Role` accepts one or more comma-separated roles/permissions. Built-in role mappings include `analyst`, `financial-controller`, `controller`, `restricted-reviewer`, and `admin`; explicit permissions such as `compensation-access` and `legal-access` remain supported.
+
+For example:
+
+```text
+X-User-Id: controller-42
+X-User-Role: compensation-access
+```
+
+A user with `compensation-access` can retrieve `restricted:compensation` but not `restricted:legal-contingencies`. A `financial-controller` is mapped to compensation, related-party, and legal-contingency access. Retrieved sources, including authorized restricted sources, are persisted in `retrieval_audit_logs` with user identity, roles, document/chunk IDs, confidentiality tier, question, authorization status, and timestamp.
+
+The audit table intentionally stores document/chunk IDs without foreign keys so audit history survives deletion of the source content.
+

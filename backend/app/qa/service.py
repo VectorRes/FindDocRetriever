@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app.qa.conversation import get_or_create_session, get_recent_history, record_turn
 from app.qa.graph import get_qa_graph
 from app.qa.schemas import GroundedAnswer
-from app.retrieval.service import retrieve
+from app.retrieval.service import retrieve, restricted_match_exists
 
 
 def answer_question(
@@ -13,6 +13,8 @@ def answer_question(
     question: str,
     top_k: int | None = None,
     session_id: UUID | None = None,
+    user_roles: str | None = "analyst",
+    user_id: str | None = "anonymous",
 ) -> GroundedAnswer:
     """Retrieve relevant sources for `question` and generate a grounded, cited answer.
 
@@ -24,9 +26,23 @@ def answer_question(
     session = get_or_create_session(db, session_id)
     history = get_recent_history(db, session.id)
 
-    chunks = retrieve(db, question=question, top_k=top_k)
+    chunks = retrieve(
+        db, question=question, top_k=top_k, user_roles=user_roles, user_id=user_id
+    )
+    restricted = restricted_match_exists(
+        db, question=question, top_k=top_k, user_roles=user_roles
+    )
+    restriction_notice = (
+        "Part of the relevant information is restricted and was excluded from this answer."
+        if restricted else None
+    )
     graph = get_qa_graph()
-    result = graph.invoke({"question": question, "chunks": chunks, "history": history})
+    result = graph.invoke({
+        "question": question,
+        "chunks": chunks,
+        "history": history,
+        "restriction_notice": restriction_notice,
+    })
     answer = result["answer"]
     answer.session_id = str(session.id)
 

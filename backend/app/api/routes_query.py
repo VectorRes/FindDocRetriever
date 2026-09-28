@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -12,20 +14,38 @@ router = APIRouter()
 
 
 @router.post("/query", response_model=QueryResponse)
-def query(request: QueryRequest, db: Session = Depends(get_db)) -> QueryResponse:
-    results = retrieve(db, question=request.question, top_k=request.top_k)
+def query(
+    request: QueryRequest,
+    x_user_role: Annotated[str, Header(alias="X-User-Role")] = "analyst",
+    x_user_id: Annotated[str, Header(alias="X-User-Id")] = "anonymous",
+    db: Session = Depends(get_db),
+) -> QueryResponse:
+    results = retrieve(
+        db, question=request.question, top_k=request.top_k, user_roles=x_user_role, user_id=x_user_id
+    )
+    db.commit()
     return QueryResponse(question=request.question, results=results)
 
 
 @router.post("/query/answer", response_model=AnswerResponse)
-def query_answer(request: QueryRequest, db: Session = Depends(get_db)) -> AnswerResponse:
+def query_answer(
+    request: QueryRequest,
+    x_user_role: Annotated[str, Header(alias="X-User-Role")] = "analyst",
+    x_user_id: Annotated[str, Header(alias="X-User-Id")] = "anonymous",
+    db: Session = Depends(get_db),
+) -> AnswerResponse:
     """ID-HU-BE-008: retrieve sources and generate a grounded, cited answer.
 
     Also implements the follow-up context part of ID-HU-BE-008/FE-001: pass
     `session_id` from the previous response to keep the conversation's context.
     """
     return answer_question(
-        db, question=request.question, top_k=request.top_k, session_id=request.session_id
+        db,
+        question=request.question,
+        top_k=request.top_k,
+        session_id=request.session_id,
+        user_roles=x_user_role,
+        user_id=x_user_id,
     )
 
 

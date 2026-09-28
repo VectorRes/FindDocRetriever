@@ -32,6 +32,7 @@ class QAState(TypedDict, total=False):
     source_map: dict[str, RetrievedChunk]
     raw_answer: LLMGroundedAnswer
     answer: GroundedAnswer
+    restriction_notice: str | None
 
 
 def generate_node(state: QAState) -> QAState:
@@ -88,12 +89,19 @@ def ground_and_validate_node(state: QAState) -> QAState:
             GroundedStatement(text=stmt.text, citations=resolved, conflicting=stmt.conflicting)
         )
 
+    notice = state.get("restriction_notice")
+    if notice:
+        # A notice is intentionally not a factual document statement, so it
+        # does not require a source citation.
+        statements.append(GroundedStatement(text=notice, notice=True))
+
     answer = GroundedAnswer(
         question=state["question"],
         statements=statements,
         sources=[_resolve_citation(sid, source_map) for sid in source_map],
         has_conflicts=any(s.conflicting for s in statements),
-        grounded=bool(statements) and not raw.unsupported,
+        grounded=(bool(statements) and not raw.unsupported) or bool(notice),
+        restriction_notice=notice,
     )
     return {"answer": answer}
 

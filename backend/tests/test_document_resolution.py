@@ -42,6 +42,11 @@ def test_get_cell_returns_value_and_formula(tmp_path, db_session):
     file_path = _make_workbook(tmp_path, "model.xlsx")
     document = ingest_excel_file(db_session, filename="model.xlsx", file_path=file_path)
     try:
+        # Ingested documents default to "restricted" (ID-HU-BE); this test is
+        # about cell/formula resolution, not confidentiality, so classify it
+        # as accessible to a plain analyst first.
+        set_confidentiality(str(document.id), ConfidentialityRequest(tag="public"), db=db_session)
+
         value_cell = get_cell(str(document.id), "FCF", "B2", db=db_session)
         assert value_cell.value == "42"
         assert value_cell.formula is None
@@ -58,6 +63,10 @@ def test_get_cell_unknown_sheet_returns_404(tmp_path, db_session):
     file_path = _make_workbook(tmp_path, "model2.xlsx")
     document = ingest_excel_file(db_session, filename="model2.xlsx", file_path=file_path)
     try:
+        # Accessible by default so the 404 below comes from the missing sheet,
+        # not from the default-restricted confidentiality tag (ID-HU-BE).
+        set_confidentiality(str(document.id), ConfidentialityRequest(tag="public"), db=db_session)
+
         with pytest.raises(HTTPException) as exc_info:
             get_cell(str(document.id), "DoesNotExist", "A1", db=db_session)
         assert exc_info.value.status_code == 404
@@ -95,6 +104,9 @@ def test_get_document_file_serves_the_original_bytes(tmp_path, db_session):
         # Mirrors what routes_ingest.py does after a successful ingestion.
         document.storage_path = save_document_file(document.id, ".xlsx", file_path)
         db_session.commit()
+        # Accessible by default (ID-HU-BE default-restricts new documents);
+        # this test only cares about file serving, not confidentiality.
+        set_confidentiality(str(document.id), ConfidentialityRequest(tag="public"), db=db_session)
 
         response = get_document_file(str(document.id), db=db_session)
         assert response.path.exists()
@@ -108,6 +120,10 @@ def test_get_document_file_404s_when_never_persisted(tmp_path, db_session):
     file_path = _make_workbook(tmp_path, "model4.xlsx")
     document = ingest_excel_file(db_session, filename="model4.xlsx", file_path=file_path)
     try:
+        # Accessible by default so the 404 below comes from the missing
+        # storage path, not from the default-restricted confidentiality tag.
+        set_confidentiality(str(document.id), ConfidentialityRequest(tag="public"), db=db_session)
+
         with pytest.raises(HTTPException) as exc_info:
             get_document_file(str(document.id), db=db_session)
         assert exc_info.value.status_code == 404

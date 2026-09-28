@@ -81,6 +81,7 @@ class GroundedStatement:
     text: str
     citations: list[ResolvedCitation] = field(default_factory=list)
     conflicting: bool = False
+    notice: bool = False
 
 
 @dataclass
@@ -100,3 +101,4 @@ class GroundedAnswer:
     # detection logic lands, so the frontend can build against this shape now.
     needs_clarification: bool = False
     clarification_question: str | None = None
+    restriction_notice: str | None = None

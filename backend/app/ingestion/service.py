@@ -9,11 +9,12 @@ from app.ingestion.chunker import chunk_pdf, chunk_workbook
 from app.ingestion.excel_parser import ExcelParsingError, parse_excel
 from app.ingestion.pdf_parser import PdfParsingError, parse_pdf
 from app.retrieval.vector_store import add_chunks
+from app.retrieval.access import DEFAULT_TAG
 
 
 def ingest_excel_file(db: Session, filename: str, file_path: Path) -> Document:
     document = Document(
-        filename=filename, doc_type="excel", status=DocumentStatus.processing.value, warnings=[]
+        filename=filename, doc_type="excel", status=DocumentStatus.processing.value, warnings=[], confidentiality_tag=DEFAULT_TAG
     )
     db.add(document)
     db.flush()
@@ -82,7 +83,7 @@ def ingest_excel_file(db: Session, filename: str, file_path: Path) -> Document:
 
 def ingest_pdf_file(db: Session, filename: str, file_path: Path) -> Document:
     document = Document(
-        filename=filename, doc_type="pdf", status=DocumentStatus.processing.value, warnings=[]
+        filename=filename, doc_type="pdf", status=DocumentStatus.processing.value, warnings=[], confidentiality_tag=DEFAULT_TAG
     )
     db.add(document)
     db.flush()

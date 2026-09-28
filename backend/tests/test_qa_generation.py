@@ -168,3 +168,24 @@ def test_no_retrieved_sources_short_circuits_without_calling_the_model(monkeypat
     assert answer.grounded is False
     assert answer.statements == []
     assert answer.sources == []
+
+
+def test_restriction_notice_is_returned_without_exposing_restricted_source(monkeypatch):
+    chunks = [make_chunk()]
+    raw = LLMGroundedAnswer(statements=[])
+    _patch_llm(monkeypatch, raw)
+
+    result = get_qa_graph().invoke({
+        "question": "What is compensation?",
+        "chunks": chunks,
+        "restriction_notice": (
+            "Part of the relevant information is restricted and was excluded from this answer."
+        ),
+    })
+    answer = result["answer"]
+
+    assert answer.grounded is True
+    assert answer.restriction_notice is not None
+    assert len(answer.statements) == 1
+    assert answer.statements[0].notice is True
+    assert answer.statements[0].citations == []

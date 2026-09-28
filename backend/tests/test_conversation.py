@@ -53,6 +53,10 @@ def test_follow_up_question_receives_prior_turn_as_history(monkeypatch, tmp_path
     wb.save(file_path)
 
     document = ingest_excel_file(db_session, filename="budget.xlsx", file_path=file_path)
+    document.confidentiality_tag = "public"
+    for chunk in document.chunks:
+        chunk.confidentiality_tag = "public"
+    db_session.commit()
     session_id = None
     try:
         prompts: list[str] = []

@@ -34,14 +34,31 @@ def add_chunks(
     return rows
 
 
-def similarity_search(db: Session, query_embedding: list[float], top_k: int) -> list[Chunk]:
-    # No joinedload here: combining it with ORDER BY on a computed distance
-    # expression + LIMIT makes SQLAlchemy wrap the query in a subquery that
-    # drops the distance expression, silently returning zero rows. Access
-    # to chunk.document below lazy-loads instead (fine at this top_k scale).
+def similarity_search(
+    db: Session,
+    query_embedding: list[float],
+    top_k: int,
+    accessible_tags: set[str] | None = None,
+) -> list[Chunk]:
+    # Apply confidentiality before LIMIT so restricted chunks never consume
+    # retrieval slots and never reach the generation model.
+    stmt = select(Chunk)
+    if accessible_tags is not None:
+        stmt = stmt.where(Chunk.confidentiality_tag.in_(accessible_tags))
+    stmt = stmt.order_by(Chunk.embedding.cosine_distance(query_embedding)).limit(top_k)
+    return list(db.scalars(stmt))
+
+def has_inaccessible_match(
+    db: Session,
+    query_embedding: list[float],
+    accessible_tags: set[str],
+    top_k: int,
+) -> bool:
+    # Check only the nearest matches. Their text is never passed to QA.
     stmt = (
-        select(Chunk)
+        select(Chunk.confidentiality_tag)
         .order_by(Chunk.embedding.cosine_distance(query_embedding))
         .limit(top_k)
     )
-    return list(db.scalars(stmt))
+    tags = db.scalars(stmt).all()
+    return any(tag not in accessible_tags for tag in tags)

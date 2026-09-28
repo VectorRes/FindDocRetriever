@@ -50,10 +50,11 @@ class Document(Base):
     superseded_by_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("documents.id", ondelete="SET NULL"), nullable=True
     )
-    # Minimal confidentiality tagging (ID-HU-FE-002): "public" or "restricted".
-    # Placeholder access model until the full access-control/roles story exists —
-    # enforced only via the X-User-Role header in routes_documents.py.
-    confidentiality_tag: Mapped[str] = mapped_column(String(32), default="public")
+    # Restrictive by default. Reviewers can classify documents as public/internal
+    # or assign a category such as restricted:compensation.
+    confidentiality_tag: Mapped[str] = mapped_column(
+        String(64), default="restricted", nullable=False
+    )
     # Path to the original uploaded file on disk, set by routes_ingest.py after
     # ingestion succeeds. Null if the file was never persisted (e.g. ingested
     # before this existed, or ingestion failed before the copy step).
@@ -169,10 +170,37 @@ class Chunk(Base):
     # Confidence in [0, 1]; null for chunk types where confidence isn't meaningful.
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     confidence_label: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Section-level confidentiality. Missing labels are safe by default.
+    confidentiality_tag: Mapped[str] = mapped_column(
+        String(64), default="restricted", nullable=False
+    )
 
     document: Mapped["Document"] = relationship(back_populates="chunks")
     pdf_table: Mapped["PdfTable | None"] = relationship(back_populates="chunks")
     pdf_reference: Mapped["PdfReference | None"] = relationship(back_populates="chunks")
+
+
+class RetrievalAuditLog(Base):
+    """Immutable audit event for content returned by retrieval.
+
+    Restricted content is logged on successful authorized retrievals as well as
+    ordinary content, so legitimate access remains auditable.
+    """
+
+    __tablename__ = "retrieval_audit_logs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    user_id: Mapped[str] = mapped_column(String(255), default="anonymous", nullable=False)
+    roles: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    action: Mapped[str] = mapped_column(String(32), default="retrieve", nullable=False)
+    # Kept as reference IDs rather than foreign keys so audit history survives
+    # document/chunk deletion.
+    document_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    chunk_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    confidentiality_tag: Mapped[str] = mapped_column(String(64), nullable=False)
+    authorized: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class ConversationSession(Base):
