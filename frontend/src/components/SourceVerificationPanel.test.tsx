@@ -30,6 +30,7 @@ function makeDocument(overrides: Partial<DocumentOut> = {}): DocumentOut {
     is_current: true,
     superseded_by_id: null,
     confidentiality_tag: "public",
+    sheet_names: [],
     ...overrides,
   };
 }
