@@ -115,4 +115,56 @@ describe("AnswerMessage", () => {
     expect(screen.getByText(new RegExp(notice))).toBeInTheDocument();
     expect(screen.queryByText(/couldn't find a reliable answer/i)).not.toBeInTheDocument();
   });
+
+  it("says which version the answer used, and flags a non-current one", () => {
+    render(
+      <AnswerMessage
+        answer={{
+          ...baseAnswer,
+          grounded: true,
+          statements: [{ text: "Q3 revenue was 90.", citations: [citation], conflicting: false }],
+          versions_used: [
+            {
+              document_id: "doc-1",
+              filename: "Budget_v1.xlsx",
+              version_number: 1,
+              approval_status: "approved",
+              is_current: false,
+              current_version_filename: "Budget_v2.xlsx",
+            },
+          ],
+        }}
+        onCitationClick={vi.fn()}
+      />
+    );
+    expect(screen.getByText(/which is not the/i)).toHaveTextContent(
+      "This answer uses Budget_v1.xlsx (v1), which is not the current version — the current one is Budget_v2.xlsx."
+    );
+    expect(screen.getByText(/based on/i)).toHaveTextContent("Budget_v1.xlsx (v1, approved)");
+  });
+
+  it("shows the version used without a warning when it is the current one", () => {
+    render(
+      <AnswerMessage
+        answer={{
+          ...baseAnswer,
+          grounded: true,
+          statements: [{ text: "Q3 revenue was 100.", citations: [citation], conflicting: false }],
+          versions_used: [
+            {
+              document_id: "doc-2",
+              filename: "Budget_v2.xlsx",
+              version_number: 2,
+              approval_status: "approved",
+              is_current: true,
+              current_version_filename: null,
+            },
+          ],
+        }}
+        onCitationClick={vi.fn()}
+      />
+    );
+    expect(screen.getByText(/based on/i)).toHaveTextContent("Budget_v2.xlsx (v2, approved, current)");
+    expect(screen.queryByText(/not the current version/i)).not.toBeInTheDocument();
+  });
 });

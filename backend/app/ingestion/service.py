@@ -10,20 +10,26 @@ from app.ingestion.excel_parser import ExcelParsingError, parse_excel
 from app.ingestion.pdf_parser import PdfParsingError, parse_pdf
 from app.retrieval.vector_store import add_chunks
 from app.retrieval.access import DEFAULT_TAG
+from app.versioning import assign_version, recompute_group
 
 
-def ingest_excel_file(db: Session, filename: str, file_path: Path) -> Document:
+def ingest_excel_file(
+    db: Session, filename: str, file_path: Path, version_of: Document | None = None
+) -> Document:
     document = Document(
         filename=filename, doc_type="excel", status=DocumentStatus.processing.value, warnings=[], confidentiality_tag=DEFAULT_TAG
     )
     db.add(document)
     db.flush()
+    # ID-HU-BE-015: newest version of its group (derived from the filename).
+    assign_version(db, document, version_of=version_of)
 
     try:
         parsed = parse_excel(file_path)
     except ExcelParsingError as exc:
         document.status = DocumentStatus.failed.value
         document.error_message = str(exc)
+        recompute_group(db, document.version_group)
         db.commit()
         return document
 
@@ -76,23 +82,30 @@ def ingest_excel_file(db: Session, filename: str, file_path: Path) -> Document:
         )
 
     document.status = DocumentStatus.ready.value
+    # Decide whether this version becomes its group's default (ID-HU-BE-015).
+    recompute_group(db, document.version_group)
     db.commit()
     db.refresh(document)
     return document
 
 
-def ingest_pdf_file(db: Session, filename: str, file_path: Path) -> Document:
+def ingest_pdf_file(
+    db: Session, filename: str, file_path: Path, version_of: Document | None = None
+) -> Document:
     document = Document(
         filename=filename, doc_type="pdf", status=DocumentStatus.processing.value, warnings=[], confidentiality_tag=DEFAULT_TAG
     )
     db.add(document)
     db.flush()
+    # ID-HU-BE-015: newest version of its group (derived from the filename).
+    assign_version(db, document, version_of=version_of)
 
     try:
         parsed = parse_pdf(file_path)
     except PdfParsingError as exc:
         document.status = DocumentStatus.failed.value
         document.error_message = str(exc)
+        recompute_group(db, document.version_group)
         db.commit()
         return document
 
@@ -144,6 +157,8 @@ def ingest_pdf_file(db: Session, filename: str, file_path: Path) -> Document:
         add_chunks(db, document_id=document.id, chunks=chunk_rows, embeddings=embeddings)
 
     document.status = DocumentStatus.ready.value
+    # Decide whether this version becomes its group's default (ID-HU-BE-015).
+    recompute_group(db, document.version_group)
     db.commit()
     db.refresh(document)
     return document

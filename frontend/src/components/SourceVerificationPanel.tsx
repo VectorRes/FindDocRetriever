@@ -101,6 +101,10 @@ export default function SourceVerificationPanel({ citation, onClose }: SourceVer
 
           <div>
             <div style={{ fontWeight: 600 }}>{resolution.document.filename}</div>
+            <div style={{ fontSize: "0.8rem", color: "#64748b" }}>
+              Version {resolution.document.version_number} · {resolution.document.approval_status}
+              {resolution.is_superseded && " · superseded"}
+            </div>
             {citation.sheet_name && (
               <div style={{ fontSize: "0.9rem", color: "#334155" }}>
                 Sheet <strong>{citation.sheet_name}</strong>

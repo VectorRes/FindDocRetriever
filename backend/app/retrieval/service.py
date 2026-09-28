@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from uuid import UUID
 
 from sqlalchemy.orm import Session
 
@@ -37,7 +38,10 @@ def retrieve(
     top_k: int | None = None,
     user_roles: str | None = "analyst",
     user_id: str | None = "anonymous",
+    document_id: UUID | None = None,
 ) -> list[RetrievedChunk]:
+    """Nearest accessible chunks to `question`, from each document's default
+    version — or only from `document_id` when given (ID-HU-BE-015)."""
     settings = get_settings()
     provider = get_embedding_provider()
     [query_embedding] = provider.embed([question])
@@ -45,7 +49,7 @@ def retrieve(
     allowed_tags = _allowed_tags(db, roles)
     chunks = similarity_search(
         db, query_embedding, top_k or settings.retrieval_top_k,
-        accessible_tags=allowed_tags,
+        accessible_tags=allowed_tags, document_id=document_id,
     )
 
     # Every returned source is an auditable retrieval. This deliberately logs
@@ -92,6 +96,7 @@ def restricted_match_exists(
     question: str,
     top_k: int | None = None,
     user_roles: str | None = "analyst",
+    document_id: UUID | None = None,
 ) -> bool:
     settings = get_settings()
     provider = get_embedding_provider()
@@ -99,5 +104,6 @@ def restricted_match_exists(
     roles = parse_roles(user_roles)
     allowed_tags = _allowed_tags(db, roles)
     return has_inaccessible_match(
-        db, query_embedding, allowed_tags, top_k or settings.retrieval_top_k
+        db, query_embedding, allowed_tags, top_k or settings.retrieval_top_k,
+        document_id=document_id,
     )

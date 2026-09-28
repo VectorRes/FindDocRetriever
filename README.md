@@ -95,7 +95,10 @@ momento de migrar). Para comparar `openai` vs `local`, lo más simple es usar ba
 
 - `POST /ingest` — sube un `.xlsx`/`.xlsm` o un `.pdf` (multipart `file`), lo parsea,
   indexa y devuelve el estado del documento (`ready`/`failed`) junto con `doc_type`
-  (`excel`/`pdf`) y los warnings de ingesta:
+  (`excel`/`pdf`), su versión (ver [Control de versiones](#control-de-versiones-id-hu-be-015))
+  y los warnings de ingesta. Campo multipart opcional `version_of` (id de un
+  documento existente) para registrarlo como nueva versión de ese documento
+  aunque el nombre no siga la convención `_vN`:
   - Excel: macros, enlaces externos, hojas protegidas, referencias circulares.
   - PDF: páginas sin texto extraíble ni OCR utilizable, páginas OCR de baja
     confianza, tablas detectadas con estructura de baja confianza, y PDFs
@@ -122,7 +125,48 @@ momento de migrar). Para comparar `openai` vs `local`, lo más simple es usar ba
   pronombres/referencias implícitas tipo "¿y el trimestre pasado?"). Incluye
   también `needs_clarification`/`clarification_question`, el contrato para
   ID-HU-BE-009 (detección de ambigüedad) — siempre `false`/`null` hasta que esa
-  historia se implemente.
+  historia se implemente. `versions_used[]` indica qué versión de cada documento
+  citado se usó; `document_id` (opcional en el request) limita la pregunta a una
+  versión específica — ver [Control de versiones](#control-de-versiones-id-hu-be-015).
+
+### Control de versiones (ID-HU-BE-015)
+
+Cada documento pertenece a un **grupo de versiones**, derivado del nombre del
+archivo: `Budget_v1.xlsx`, `Budget_v2.xlsx` y `Budget.xlsx` son versiones del
+mismo documento (`excel:budget`). Se reconocen sufijos `_v2`, ` v2.1`, `-ver3`,
+`_version 4` y ` (1)`; un periodo distinto (`Budget_2025_v1.xlsx`) es otro
+documento, y un PDF nunca se agrupa con un Excel. Para nombres que no siguen la
+convención, usar `version_of` en `POST /ingest` o `POST /documents/{id}/supersede`.
+
+Cada subida entra como la versión más reciente de su grupo (`version_number`),
+en estado `draft`. La **versión por defecto** del grupo (`is_current=true`) es:
+- la versión **aprobada** más reciente, o
+- si no hay ninguna aprobada, la versión más reciente (así un documento recién
+  subido y sin versiones previas se puede consultar de inmediato).
+
+Una versión nueva **no reemplaza** a una aprobada hasta que se aprueba: mientras
+tanto queda como "pendiente de aprobación". Al aprobarla pasa a ser la versión
+por defecto y la anterior queda `superseded`, enlazada a su sucesora vía
+`superseded_by_id`. Las versiones anteriores nunca se borran automáticamente.
+
+`/query` y `/query/answer` solo usan la versión por defecto de cada grupo (el
+filtro se aplica antes del `LIMIT`). Para auditoría, `document_id` en el request
+limita la búsqueda a esa versión específica, aunque esté superada; la respuesta
+lo indica en `versions_used[]` (`is_current=false`, `current_version_filename`).
+
+Endpoints:
+- `POST /documents/{document_id}/approve` — aprueba una versión. Requiere un rol
+  aprobador en `X-User-Role` (`reviewer`, `restricted-reviewer`,
+  `financial-controller`/`controller`, `admin`); si no, `403`. `400` si el
+  documento no terminó de procesarse (`ready`).
+- `GET /documents/{document_id}/versions` — todas las versiones del grupo, de la
+  más reciente a la más antigua, incluidas las superadas.
+- Al borrar la versión por defecto (`DELETE /documents/{id}`), el grupo vuelve a
+  la siguiente según la misma regla.
+
+Los documentos existentes antes de la migración `0012_version_control` quedan
+como `approved` (ya se estaban usando para responder).
+
 ### Confidentialidad y control de acceso
 
 Los documentos y chunks nuevos se clasifican como `restricted` por defecto.
@@ -149,7 +193,9 @@ Endpoints de clasificación:
 
 - `GET /documents/{document_id}/resolve` (ID-HU-FE-002) — antes de mostrar la
   fuente de una citación: si el documento fue superado por una versión más
-  reciente (`is_superseded` + `current_version`) y si el usuario tiene acceso
+  reciente (`is_superseded` + `current_version`, la versión por defecto de su
+  grupo; una versión nueva pendiente de aprobación no cuenta como superada) y si
+  el usuario tiene acceso
   (`access.allowed`/`access.reason`, según `confidentiality_tag` y el header
   `X-User-Role` y la política de permisos de confidencialidad.
 - `GET /documents/{document_id}/cells/{sheet_name}/{address}` — valor, fórmula
@@ -157,10 +203,13 @@ Endpoints de clasificación:
   acceso que `/resolve`.
 - `GET /documents/{document_id}/file` — sirve el archivo original ("abrir
   archivo original" y el visor de PDF). `404` si nunca se persistió, `403` si
-  el documento está `restricted` y el rol no alcanza.
+  el documento está `restricted` y el rol no alcanza. Acepta `?role=` como
+  alternativa al header (el navegador carga esta URL directo en iframe/link).
 - `POST /documents/{document_id}/supersede` — `{"new_document_id": "..."}`,
-  enlaza explícitamente una versión vieja con la nueva (no hay detección
-  automática de "mismo nombre = nueva versión" al ingerir).
+  enlaza explícitamente una versión vieja con la nueva cuando los nombres no lo
+  revelan: el documento pasa al grupo de la nueva, justo antes de ella. Cuál
+  queda por defecto sigue la regla de aprobación (si la vieja está aprobada y la
+  nueva no, hay que aprobar la nueva).
 - `GET /health` — chequeo básico.
 
 Documentación interactiva en `http://localhost:8000/docs`.
@@ -292,6 +341,7 @@ backend/app/
   storage.py                # persistencia de archivos originales en disco
   db/models.py             # Document, Sheet, Cell, NamedRange, PdfTable, PdfReference, Chunk,
                             # ConversationSession, ConversationMessage
+  versioning.py             # ID-HU-BE-015: grupos de versiones, aprobación, versión por defecto
   schemas.py                # DTOs Pydantic de la API (incluye PdfStructureResponse, AnswerResponse,
                              # DocumentResolutionOut, CellOut)
   ingestion/
@@ -312,7 +362,7 @@ backend/app/
     routes_ingest.py           # POST /ingest
     routes_query.py              # POST /query, POST /query/answer, GET /documents/{id}/pdf-structure
     routes_documents.py            # GET /documents/{id}/resolve, /cells/{sheet}/{address}, /file,
-                                    # POST /supersede, PATCH /confidentiality
+                                    # /versions, POST /approve, /supersede, PATCH /confidentiality
 
 frontend/src/
   api/

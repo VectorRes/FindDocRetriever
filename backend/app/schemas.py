@@ -16,6 +16,11 @@ class DocumentOut(BaseModel):
     uploaded_at: datetime
     is_current: bool
     superseded_by_id: UUID | None
+    # ID-HU-BE-015 version control: see app/versioning.py.
+    version_group: str
+    version_number: int
+    approval_status: str
+    approved_at: datetime | None = None
     confidentiality_tag: str
     # Sheet names detected during Excel ingestion (ID-HU-FE-005's "parsing
     # summary"); always empty for PDFs.
@@ -32,6 +37,9 @@ class QueryRequest(BaseModel):
     # Omit on the first question of a conversation; pass back the session_id
     # from the previous AnswerResponse to keep follow-up context (ID-HU-FE-001).
     session_id: UUID | None = None
+    # ID-HU-BE-015: scope the question to one specific document version (e.g.
+    # a superseded one, for audit). Omit to use each document's default version.
+    document_id: UUID | None = None
 
 
 class RetrievedChunkOut(BaseModel):
@@ -98,6 +106,17 @@ class CitationOut(BaseModel):
     text: str
 
 
+class VersionUsedOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    document_id: UUID
+    filename: str
+    version_number: int
+    approval_status: str
+    is_current: bool
+    current_version_filename: str | None = None
+
+
 class StatementOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -129,6 +148,8 @@ class AnswerResponse(BaseModel):
     needs_clarification: bool = False
     clarification_question: str | None = None
     restriction_notice: str | None = None
+    # ID-HU-BE-015: which document version(s) the cited sources came from.
+    versions_used: list[VersionUsedOut] = []
 
 
 class CellOut(BaseModel):

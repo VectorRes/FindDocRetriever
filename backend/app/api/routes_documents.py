@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import Cell, Chunk, Document, Sheet
+from app.db.models import Cell, Chunk, Document, DocumentStatus, Sheet
 from app.db.session import get_db
 from app.schemas import (
     AccessDecision,
@@ -29,6 +29,13 @@ from app.schemas import (
 )
 from app.storage import delete_document_file, get_document_file_path
 from app.retrieval.access import can_access, normalize_tag, parse_roles
+from app.versioning import (
+    APPROVER_ROLES,
+    approve,
+    current_version_of,
+    recompute_group,
+    versions_of,
+)
 
 router = APIRouter()
 
@@ -48,10 +55,15 @@ def delete_document(document_id: str, db: Session = Depends(get_db)) -> None:
     """Removes a document (ID-HU-FE-005: undoing an accidental upload).
     Cascades to its sheets/cells/chunks/PDF tables; any document that names
     this one as its superseded_by_id falls back to null (ON DELETE SET NULL)
-    rather than pointing at a deleted row."""
+    rather than pointing at a deleted row.
+
+    If it was its group's default version, the next best version (latest
+    approved, else latest) takes over (ID-HU-BE-015)."""
     document = _get_document_or_404(db, document_id)
+    version_group = document.version_group
     delete_document_file(document.storage_path)
     db.delete(document)
+    recompute_group(db, version_group)
     db.commit()
 
 
@@ -84,13 +96,14 @@ def resolve_document(
 ) -> DocumentResolutionOut:
     document = _get_document_or_404(db, document_id)
 
-    current_version: Document | None = None
-    if not document.is_current and document.superseded_by_id is not None:
-        current_version = db.get(Document, document.superseded_by_id)
+    # "Superseded" means a newer version replaced this one. A newer draft still
+    # awaiting approval is neither current nor superseded (ID-HU-BE-015).
+    is_superseded = document.superseded_by_id is not None
+    current_version = current_version_of(db, document) if is_superseded else None
 
     return DocumentResolutionOut(
         document=document,
-        is_superseded=not document.is_current,
+        is_superseded=is_superseded,
         current_version=current_version,
         access=_check_access(document, x_user_role),
     )
@@ -159,20 +172,66 @@ def get_document_file(
     return FileResponse(path, filename=document.filename)
 
 
+@router.get("/documents/{document_id}/versions", response_model=DocumentListOut)
+def list_versions(document_id: str, db: Session = Depends(get_db)) -> DocumentListOut:
+    """Every version of this document's group, newest first — including
+    superseded ones, which stay available for audit (ID-HU-BE-015)."""
+    document = _get_document_or_404(db, document_id)
+    return DocumentListOut(documents=versions_of(db, document))
+
+
+@router.post("/documents/{document_id}/approve", response_model=DocumentOut)
+def approve_document(
+    document_id: str,
+    x_user_role: Annotated[str, Header(alias="X-User-Role")] = "analyst",
+    db: Session = Depends(get_db),
+) -> DocumentOut:
+    """Approve a version (ID-HU-BE-015). If it's the newest approved version
+    of its group it becomes the default for future answers, and the version
+    it replaces is marked superseded and linked to it."""
+    if not parse_roles(x_user_role) & APPROVER_ROLES:
+        raise HTTPException(
+            status_code=403, detail="Approving a document version requires a reviewer role."
+        )
+    document = _get_document_or_404(db, document_id)
+    if document.status != DocumentStatus.ready.value:
+        raise HTTPException(status_code=400, detail="Only successfully processed documents can be approved.")
+
+    approve(db, document)
+    db.commit()
+    db.refresh(document)
+    return document
+
+
 @router.post("/documents/{document_id}/supersede", response_model=DocumentOut)
 def supersede_document(
     document_id: str, request: SupersedeRequest, db: Session = Depends(get_db)
 ) -> DocumentOut:
-    """Mark `document_id` as superseded by `new_document_id` (ID-HU-FE-002's
-    "newer approved version exists" warning). Linking is explicit — there is
-    no automatic "same filename = new version" detection during ingestion."""
+    """Explicitly link `document_id` as an older version of `new_document_id`
+    (for files whose names don't reveal they're versions of each other).
+
+    The document joins the newer one's version group, ordered just before it.
+    Which version is the default still follows the approval rule: if
+    `document_id` is approved and the newer one isn't, approve the newer one
+    too (POST /documents/{id}/approve) to make it the default."""
     document = _get_document_or_404(db, document_id)
     newer = db.get(Document, request.new_document_id)
     if newer is None:
         raise HTTPException(status_code=404, detail="new_document_id not found")
+    if newer.id == document.id:
+        raise HTTPException(status_code=400, detail="A document cannot supersede itself")
 
-    document.is_current = False
-    document.superseded_by_id = newer.id
+    old_group = document.version_group
+    others = [v for v in versions_of(db, newer) if v.id != document.id]  # newest first
+    ordered = list(reversed(others))
+    ordered.insert(ordered.index(newer), document)
+    document.version_group = newer.version_group
+    for number, member in enumerate(ordered, start=1):
+        member.version_number = number
+
+    recompute_group(db, newer.version_group)
+    if old_group != newer.version_group:
+        recompute_group(db, old_group)
     db.commit()
     db.refresh(document)
     return document

@@ -26,6 +26,15 @@ export type UserRole = (typeof USER_ROLES)[number];
 // enforce this yet — it's a UI-level guard until real auth exists.
 export const CLASSIFIER_ROLES: readonly UserRole[] = ["reviewer", "restricted-reviewer", "admin"];
 
+// Roles allowed to approve a document version — mirrors APPROVER_ROLES in
+// app/versioning.py, which the backend does enforce.
+export const APPROVER_ROLES: readonly UserRole[] = [
+  "reviewer",
+  "financial-controller",
+  "restricted-reviewer",
+  "admin",
+];
+
 const ROLE_STORAGE_KEY = "findoc.userRole";
 let currentRole: UserRole = readStoredRole();
 
@@ -124,6 +133,18 @@ export async function setDocumentConfidentiality(documentId: string, tag: string
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
     throw new ApiError(detail || `Update failed with status ${res.status}`, "http", res.status);
+  }
+  return (await res.json()) as DocumentOut;
+}
+
+export async function approveDocument(documentId: string): Promise<DocumentOut> {
+  const res = await fetch(`${API_URL}/documents/${documentId}/approve`, {
+    method: "POST",
+    headers: roleHeaders(),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new ApiError(detail || `Approval failed with status ${res.status}`, "http", res.status);
   }
   return (await res.json()) as DocumentOut;
 }

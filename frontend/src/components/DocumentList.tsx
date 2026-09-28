@@ -1,5 +1,11 @@
 import { useEffect, useState } from "react";
-import { ApiError, deleteDocument, listDocuments, setDocumentConfidentiality } from "../api/client";
+import {
+  ApiError,
+  approveDocument,
+  deleteDocument,
+  listDocuments,
+  setDocumentConfidentiality,
+} from "../api/client";
 import type { DocumentOut } from "../api/types";
 import DocumentUpload from "./DocumentUpload";
 
@@ -20,6 +26,17 @@ const CONFIDENTIALITY_OPTIONS = [
   "restricted:legal",
 ];
 
+// ID-HU-BE-015: where a version stands in its group. A newer draft that
+// hasn't been approved yet is neither current nor superseded.
+function versionState(doc: DocumentOut): { label: string; style: { background: string; color: string } } | null {
+  if (doc.is_current) return { label: "current version", style: currentBadgeStyle };
+  if (doc.superseded_by_id) return { label: "superseded", style: supersededBadgeStyle };
+  if (doc.status === "ready" && doc.approval_status === "draft") {
+    return { label: "pending approval", style: pendingBadgeStyle };
+  }
+  return null;
+}
+
 function confidentialityStyle(tag: string): { background: string; color: string } {
   if (tag === "public") return { background: "#f0fdf4", color: "#15803d" };
   if (tag === "internal") return { background: "#eff6ff", color: "#1d4ed8" };
@@ -31,9 +48,19 @@ interface DocumentListProps {
   onClose: () => void;
   // Whether the current role may reclassify documents (see CLASSIFIER_ROLES).
   canClassify?: boolean;
+  // Whether the current role may approve versions (see APPROVER_ROLES).
+  canApprove?: boolean;
+  // Scope the chat to one specific version, e.g. a superseded one for audit.
+  onAskAboutVersion?: (document: DocumentOut) => void;
 }
 
-export default function DocumentList({ open, onClose, canClassify = false }: DocumentListProps) {
+export default function DocumentList({
+  open,
+  onClose,
+  canClassify = false,
+  canApprove = false,
+  onAskAboutVersion,
+}: DocumentListProps) {
   const [documents, setDocuments] = useState<DocumentOut[]>([]);
   const [status, setStatus] = useState<"loading" | "done" | "error">("loading");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -41,6 +68,8 @@ export default function DocumentList({ open, onClose, canClassify = false }: Doc
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [classifyingId, setClassifyingId] = useState<string | null>(null);
   const [classifyError, setClassifyError] = useState<{ id: string; message: string } | null>(null);
+  const [approvingId, setApprovingId] = useState<string | null>(null);
+  const [approveError, setApproveError] = useState<{ id: string; message: string } | null>(null);
 
   function refresh() {
     setStatus("loading");
@@ -88,6 +117,24 @@ export default function DocumentList({ open, onClose, canClassify = false }: Doc
     }
   }
 
+  async function approve(documentId: string) {
+    setApprovingId(documentId);
+    setApproveError(null);
+    try {
+      await approveDocument(documentId);
+      // Approval can change which version of the group is current, so reload
+      // the whole list rather than just this card.
+      refresh();
+    } catch (err) {
+      setApproveError({
+        id: documentId,
+        message: err instanceof ApiError ? err.message : "Could not approve this version.",
+      });
+    } finally {
+      setApprovingId(null);
+    }
+  }
+
   function byId(id: string | null): DocumentOut | undefined {
     return id ? documents.find((doc) => doc.id === id) : undefined;
   }
@@ -124,6 +171,7 @@ export default function DocumentList({ open, onClose, canClassify = false }: Doc
             const statusStyle = STATUS_STYLES[doc.status] ?? STATUS_STYLES.queued;
             const supersededBy = byId(doc.superseded_by_id);
             const isPendingDelete = pendingDeleteId === doc.id;
+            const version = versionState(doc);
 
             return (
               <div key={doc.id} style={cardStyle}>
@@ -133,9 +181,11 @@ export default function DocumentList({ open, onClose, canClassify = false }: Doc
                 </div>
 
                 <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap" }}>
-                  <span style={{ ...badgeStyle, ...(doc.is_current ? currentBadgeStyle : supersededBadgeStyle) }}>
-                    {doc.is_current ? "current version" : "superseded"}
-                  </span>
+                  <span style={{ ...badgeStyle, ...versionNumberBadgeStyle }}>v{doc.version_number}</span>
+                  {version && <span style={{ ...badgeStyle, ...version.style }}>{version.label}</span>}
+                  {doc.approval_status === "approved" && (
+                    <span style={{ ...badgeStyle, ...approvedBadgeStyle }}>approved</span>
+                  )}
                   <span style={{ ...badgeStyle, ...confidentialityStyle(doc.confidentiality_tag) }}>
                     {doc.confidentiality_tag}
                   </span>
@@ -195,7 +245,26 @@ export default function DocumentList({ open, onClose, canClassify = false }: Doc
                   <div style={{ fontSize: "0.8rem", color: "#b91c1c" }}>{doc.error_message}</div>
                 )}
 
-                <div style={{ marginTop: "0.15rem" }}>
+                {approveError?.id === doc.id && (
+                  <div style={{ fontSize: "0.8rem", color: "#b91c1c" }}>{approveError.message}</div>
+                )}
+
+                <div style={{ marginTop: "0.15rem", display: "flex", gap: "0.4rem", flexWrap: "wrap" }}>
+                  {canApprove && doc.status === "ready" && doc.approval_status === "draft" && !isPendingDelete && (
+                    <button
+                      type="button"
+                      onClick={() => approve(doc.id)}
+                      disabled={approvingId === doc.id}
+                      style={approveButtonStyle}
+                    >
+                      {approvingId === doc.id ? "Approving..." : "Approve version"}
+                    </button>
+                  )}
+                  {onAskAboutVersion && doc.status === "ready" && !isPendingDelete && (
+                    <button type="button" onClick={() => onAskAboutVersion(doc)} style={askButtonStyle}>
+                      Ask about this version
+                    </button>
+                  )}
                   {isPendingDelete ? (
                     <div style={{ display: "flex", gap: "0.4rem", alignItems: "center" }}>
                       <span style={{ fontSize: "0.8rem", color: "#b91c1c" }}>Delete this document?</span>
@@ -278,6 +347,29 @@ const badgeStyle = {
 
 const currentBadgeStyle = { background: "#eef2ff", color: "#4338ca" };
 const supersededBadgeStyle = { background: "#f1f5f9", color: "#64748b" };
+const pendingBadgeStyle = { background: "#fff7ed", color: "#c2410c" };
+const approvedBadgeStyle = { background: "#f0fdf4", color: "#15803d" };
+const versionNumberBadgeStyle = { background: "#f8fafc", color: "#334155", border: "1px solid #e2e8f0" };
+
+const approveButtonStyle = {
+  padding: "0.25rem 0.6rem",
+  borderRadius: "0.4rem",
+  border: "1px solid #15803d",
+  background: "white",
+  color: "#15803d",
+  cursor: "pointer",
+  fontSize: "0.78rem",
+};
+
+const askButtonStyle = {
+  padding: "0.25rem 0.6rem",
+  borderRadius: "0.4rem",
+  border: "1px solid #4f46e5",
+  background: "white",
+  color: "#4f46e5",
+  cursor: "pointer",
+  fontSize: "0.78rem",
+};
 
 const warningsSummaryStyle = {
   cursor: "pointer",

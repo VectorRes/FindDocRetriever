@@ -2,7 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import DocumentList from "./DocumentList";
-import { deleteDocument, listDocuments, setDocumentConfidentiality } from "../api/client";
+import { approveDocument, deleteDocument, listDocuments, setDocumentConfidentiality } from "../api/client";
 import type { DocumentOut } from "../api/types";
 
 vi.mock("../api/client", async () => {
@@ -12,12 +12,14 @@ vi.mock("../api/client", async () => {
     listDocuments: vi.fn(),
     deleteDocument: vi.fn(),
     setDocumentConfidentiality: vi.fn(),
+    approveDocument: vi.fn(),
   };
 });
 
 const mockedListDocuments = vi.mocked(listDocuments);
 const mockedDeleteDocument = vi.mocked(deleteDocument);
 const mockedSetConfidentiality = vi.mocked(setDocumentConfidentiality);
+const mockedApproveDocument = vi.mocked(approveDocument);
 
 function makeDocument(overrides: Partial<DocumentOut> = {}): DocumentOut {
   return {
@@ -30,6 +32,10 @@ function makeDocument(overrides: Partial<DocumentOut> = {}): DocumentOut {
     uploaded_at: "2026-01-01T00:00:00Z",
     is_current: true,
     superseded_by_id: null,
+    version_group: "excel:budget",
+    version_number: 1,
+    approval_status: "approved",
+    approved_at: null,
     confidentiality_tag: "public",
     sheet_names: ["Assumptions", "FCF"],
     ...overrides,
@@ -41,6 +47,7 @@ describe("DocumentList", () => {
     mockedListDocuments.mockReset();
     mockedDeleteDocument.mockReset();
     mockedSetConfidentiality.mockReset();
+    mockedApproveDocument.mockReset();
   });
 
   it("renders nothing when closed", () => {
@@ -136,6 +143,7 @@ describe("DocumentList", () => {
     expect(screen.queryByText(/delete this document\?/i)).not.toBeInTheDocument();
     expect(mockedDeleteDocument).not.toHaveBeenCalled();
   });
+
   it("shows the confidentiality tag but no classification control for non-classifier roles", async () => {
     mockedListDocuments.mockResolvedValueOnce({
       documents: [makeDocument({ confidentiality_tag: "restricted:compensation" })],
@@ -161,5 +169,58 @@ describe("DocumentList", () => {
 
     await waitFor(() => expect(mockedSetConfidentiality).toHaveBeenCalledWith("doc-1", "internal"));
     await waitFor(() => expect(select).toHaveValue("internal"));
+  });
+
+  it("labels a newer unapproved version as pending approval and lets an approver approve it", async () => {
+    const user = userEvent.setup();
+    const approved = makeDocument({ id: "doc-1", filename: "Budget_v1.xlsx", version_number: 1 });
+    const draft = makeDocument({
+      id: "doc-2",
+      filename: "Budget_v2.xlsx",
+      version_number: 2,
+      approval_status: "draft",
+      is_current: false,
+    });
+    mockedListDocuments.mockResolvedValueOnce({ documents: [draft, approved] });
+    mockedApproveDocument.mockResolvedValueOnce({ ...draft, approval_status: "approved", is_current: true });
+    mockedListDocuments.mockResolvedValueOnce({
+      documents: [
+        { ...draft, approval_status: "approved", is_current: true },
+        { ...approved, is_current: false, superseded_by_id: "doc-2" },
+      ],
+    });
+
+    render(<DocumentList open={true} onClose={vi.fn()} canApprove />);
+
+    await waitFor(() => expect(screen.getByText("pending approval")).toBeInTheDocument());
+    expect(screen.getByText("v2")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /approve version/i }));
+
+    await waitFor(() => expect(mockedApproveDocument).toHaveBeenCalledWith("doc-2"));
+    await waitFor(() => expect(screen.getByText("superseded")).toBeInTheDocument());
+    expect(screen.queryByText("pending approval")).not.toBeInTheDocument();
+  });
+
+  it("hides the approve action for roles that can't approve", async () => {
+    mockedListDocuments.mockResolvedValueOnce({
+      documents: [makeDocument({ approval_status: "draft" })],
+    });
+
+    render(<DocumentList open={true} onClose={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByText("budget.xlsx")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: /approve version/i })).not.toBeInTheDocument();
+  });
+
+  it("lets the analyst ask about a specific (superseded) version", async () => {
+    const user = userEvent.setup();
+    const onAskAboutVersion = vi.fn();
+    const old = makeDocument({ id: "doc-1", is_current: false, superseded_by_id: "doc-2" });
+    mockedListDocuments.mockResolvedValueOnce({ documents: [old] });
+
+    render(<DocumentList open={true} onClose={vi.fn()} onAskAboutVersion={onAskAboutVersion} />);
+
+    await user.click(await screen.findByRole("button", { name: /ask about this version/i }));
+    expect(onAskAboutVersion).toHaveBeenCalledWith(old);
   });
 });

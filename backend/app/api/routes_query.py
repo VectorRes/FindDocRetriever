@@ -21,7 +21,8 @@ def query(
     db: Session = Depends(get_db),
 ) -> QueryResponse:
     results = retrieve(
-        db, question=request.question, top_k=request.top_k, user_roles=x_user_role, user_id=x_user_id
+        db, question=request.question, top_k=request.top_k, user_roles=x_user_role,
+        user_id=x_user_id, document_id=request.document_id,
     )
     db.commit()
     return QueryResponse(question=request.question, results=results)
@@ -38,6 +39,10 @@ def query_answer(
 
     Also implements the follow-up context part of ID-HU-BE-008/FE-001: pass
     `session_id` from the previous response to keep the conversation's context.
+
+    ID-HU-BE-015: answers use each document's default (latest approved)
+    version; `versions_used` says which. Pass `document_id` to ask about one
+    specific version instead, e.g. a superseded one for audit.
     """
     return answer_question(
         db,
@@ -46,6 +51,7 @@ def query_answer(
         session_id=request.session_id,
         user_roles=x_user_role,
         user_id=x_user_id,
+        document_id=request.document_id,
     )
 
 

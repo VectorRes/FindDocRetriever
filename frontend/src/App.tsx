@@ -1,7 +1,14 @@
 import { useEffect, useState } from "react";
-import { CLASSIFIER_ROLES, USER_ROLES, getHealth, getUserRole, setUserRole } from "./api/client";
+import {
+  APPROVER_ROLES,
+  CLASSIFIER_ROLES,
+  USER_ROLES,
+  getHealth,
+  getUserRole,
+  setUserRole,
+} from "./api/client";
 import type { UserRole } from "./api/client";
-import type { CitationOut } from "./api/types";
+import type { CitationOut, DocumentOut } from "./api/types";
 import Chat from "./components/Chat";
 import DocumentList from "./components/DocumentList";
 import SourceVerificationPanel from "./components/SourceVerificationPanel";
@@ -13,6 +20,8 @@ export default function App() {
   const [selectedCitation, setSelectedCitation] = useState<CitationOut | null>(null);
   const [documentsOpen, setDocumentsOpen] = useState(false);
   const [role, setRole] = useState<UserRole>(getUserRole());
+  // ID-HU-BE-015: a specific version the chat is scoped to (e.g. superseded, for audit).
+  const [pinnedDocument, setPinnedDocument] = useState<DocumentOut | null>(null);
 
   function changeRole(next: UserRole) {
     setUserRole(next);
@@ -64,7 +73,11 @@ export default function App() {
         </div>
       </header>
       <div style={{ maxWidth: "72rem", margin: "0 auto", display: "flex", gap: "1.5rem", alignItems: "flex-start" }}>
-        <Chat onCitationClick={setSelectedCitation} />
+        <Chat
+          onCitationClick={setSelectedCitation}
+          pinnedDocument={pinnedDocument}
+          onClearPin={() => setPinnedDocument(null)}
+        />
         {selectedCitation && (
           <SourceVerificationPanel
             citation={selectedCitation}
@@ -76,6 +89,11 @@ export default function App() {
         open={documentsOpen}
         onClose={() => setDocumentsOpen(false)}
         canClassify={CLASSIFIER_ROLES.includes(role)}
+        canApprove={APPROVER_ROLES.includes(role)}
+        onAskAboutVersion={(document) => {
+          setPinnedDocument(document);
+          setDocumentsOpen(false);
+        }}
       />
     </main>
   );

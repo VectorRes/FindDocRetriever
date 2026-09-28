@@ -77,6 +77,21 @@ class ResolvedCitation:
 
 
 @dataclass
+class VersionUsed:
+    """Which version of a document an answer's citations came from
+    (ID-HU-BE-015: "the answer tells me which version was used")."""
+
+    document_id: str
+    filename: str
+    version_number: int
+    approval_status: str
+    is_current: bool
+    # Set when this version is not its group's default (i.e. the answer was
+    # explicitly scoped to an older version for audit).
+    current_version_filename: str | None = None
+
+
+@dataclass
 class GroundedStatement:
     text: str
     citations: list[ResolvedCitation] = field(default_factory=list)
@@ -102,3 +117,4 @@ class GroundedAnswer:
     needs_clarification: bool = False
     clarification_question: str | None = None
     restriction_notice: str | None = None
+    versions_used: list[VersionUsed] = field(default_factory=list)

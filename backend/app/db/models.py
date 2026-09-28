@@ -29,6 +29,14 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _default_version_group(context) -> str:
+    # Imported lazily: app.versioning imports this module.
+    from app.versioning import derive_version_group
+
+    params = context.get_current_parameters()
+    return derive_version_group(params["filename"], params.get("doc_type") or "excel")
+
+
 class Document(Base):
     """A single uploaded workbook (one filename + version)."""
 
@@ -44,12 +52,23 @@ class Document(Base):
     warnings: Mapped[list] = mapped_column(JSON, default=list)
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
-    # Minimal versioning (ID-HU-FE-002): set explicitly via POST /documents/{id}/supersede —
-    # ingestion has no automatic "same filename = new version" detection yet.
+    # Version control (ID-HU-BE-015) — maintained by app/versioning.py.
+    # `is_current` marks the group's default version (latest approved, else
+    # latest); it's what QA retrieval uses. `superseded_by_id` links an older
+    # version to the one that replaced it.
     is_current: Mapped[bool] = mapped_column(Boolean, default=True)
     superseded_by_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("documents.id", ondelete="SET NULL"), nullable=True
     )
+    # Family of uploads that are versions of the same logical document,
+    # derived from the filename ("Budget_v1.xlsx" / "Budget_v2.xlsx" -> "excel:budget").
+    version_group: Mapped[str] = mapped_column(
+        String(512), index=True, default=_default_version_group
+    )
+    version_number: Mapped[int] = mapped_column(Integer, default=1)
+    # "draft" until approved by a reviewer; see app/versioning.py.
+    approval_status: Mapped[str] = mapped_column(String(16), default="draft")
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Restrictive by default. Reviewers can classify documents as public/internal
     # or assign a category such as restricted:compensation.
     confidentiality_tag: Mapped[str] = mapped_column(

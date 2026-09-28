@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { ApiError, postQueryAnswer } from "../api/client";
-import type { AnswerResponse, CitationOut } from "../api/types";
+import type { AnswerResponse, CitationOut, DocumentOut } from "../api/types";
 import AnswerMessage from "./AnswerMessage";
 import ChatInput from "./ChatInput";
 
@@ -16,9 +16,13 @@ let nextTurnId = 1;
 
 interface ChatProps {
   onCitationClick: (citation: CitationOut) => void;
+  // When set, questions are answered from this document version only
+  // (ID-HU-BE-015 — e.g. reviewing a superseded version for audit).
+  pinnedDocument?: DocumentOut | null;
+  onClearPin?: () => void;
 }
 
-export default function Chat({ onCitationClick }: ChatProps) {
+export default function Chat({ onCitationClick, pinnedDocument = null, onClearPin }: ChatProps) {
   const [turns, setTurns] = useState<ConversationTurn[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const isSending = turns.some((t) => t.status === "loading");
@@ -28,7 +32,11 @@ export default function Chat({ onCitationClick }: ChatProps) {
     setTurns((prev) => [...prev, { id, question, status: "loading" }]);
 
     try {
-      const answer = await postQueryAnswer({ question, session_id: sessionId });
+      const answer = await postQueryAnswer({
+        question,
+        session_id: sessionId,
+        document_id: pinnedDocument?.id ?? null,
+      });
       setSessionId(answer.session_id);
       setTurns((prev) =>
         prev.map((t) => (t.id === id ? { ...t, status: "done", answer } : t))
@@ -72,10 +80,44 @@ export default function Chat({ onCitationClick }: ChatProps) {
         ))}
       </div>
 
+      {pinnedDocument && (
+        <div style={pinnedChipStyle}>
+          <span>
+            Asking about <strong>{pinnedDocument.filename}</strong> (v{pinnedDocument.version_number}
+            {pinnedDocument.is_current ? ", current version" : pinnedDocument.superseded_by_id ? ", superseded" : ", pending approval"})
+          </span>
+          {onClearPin && (
+            <button type="button" onClick={onClearPin} style={clearPinButtonStyle} aria-label="Stop asking about this version">
+              ×
+            </button>
+          )}
+        </div>
+      )}
       <ChatInput disabled={isSending} onSubmit={handleSubmit} />
     </div>
   );
 }
+
+const pinnedChipStyle = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  gap: "0.5rem",
+  padding: "0.4rem 0.7rem",
+  borderRadius: "0.5rem",
+  background: "#eef2ff",
+  color: "#3730a3",
+  fontSize: "0.85rem",
+};
+
+const clearPinButtonStyle = {
+  border: "none",
+  background: "transparent",
+  color: "#3730a3",
+  fontSize: "1.1rem",
+  lineHeight: 1,
+  cursor: "pointer",
+};
 
 const questionBubbleStyle = {
   alignSelf: "flex-end" as const,

@@ -82,4 +82,44 @@ describe("Chat", () => {
       expect(screen.getByText(/couldn't reach the findoc retriever api/i)).toBeInTheDocument()
     );
   });
+
+  it("scopes questions to a pinned version and shows which one", async () => {
+    const user = userEvent.setup();
+    const onClearPin = vi.fn();
+    mockedPostQueryAnswer.mockResolvedValueOnce(makeAnswer());
+    render(
+      <Chat
+        onCitationClick={vi.fn()}
+        pinnedDocument={{
+          id: "doc-v1",
+          filename: "Budget_v1.xlsx",
+          doc_type: "excel",
+          status: "ready",
+          error_message: null,
+          warnings: [],
+          uploaded_at: "2026-01-01T00:00:00Z",
+          is_current: false,
+          superseded_by_id: "doc-v2",
+          version_group: "excel:budget",
+          version_number: 1,
+          approval_status: "approved",
+          approved_at: null,
+          confidentiality_tag: "public",
+          sheet_names: [],
+        }}
+        onClearPin={onClearPin}
+      />
+    );
+
+    expect(screen.getByText(/asking about/i)).toHaveTextContent("Budget_v1.xlsx (v1, superseded)");
+
+    await user.type(screen.getByPlaceholderText(/ask a question/i), "What was the total?");
+    await user.click(screen.getByRole("button", { name: /^ask$/i }));
+    await waitFor(() =>
+      expect(mockedPostQueryAnswer.mock.calls[0][0]).toMatchObject({ document_id: "doc-v1" })
+    );
+
+    await user.click(screen.getByRole("button", { name: /stop asking about this version/i }));
+    expect(onClearPin).toHaveBeenCalled();
+  });
 });

@@ -39,9 +39,26 @@ export default function AnswerMessage({ answer, onCitationClick }: AnswerMessage
     );
   }
 
+  // ID-HU-BE-015: say which version(s) the answer is based on, and flag
+  // loudly when that isn't the current version (an explicit audit question).
+  const versionsUsed = answer.versions_used ?? [];
+  const nonCurrent = versionsUsed.filter((version) => !version.is_current);
+
   return (
     <div>
       {restrictionBanner}
+      {nonCurrent.map((version) => (
+        <div key={version.document_id} style={{ ...bannerStyle("#fff7ed", "#c2410c"), marginBottom: "0.5rem" }}>
+          This answer uses <strong>{version.filename}</strong> (v{version.version_number}), which is not the
+          current version
+          {version.current_version_filename && (
+            <>
+              {" "}— the current one is <strong>{version.current_version_filename}</strong>
+            </>
+          )}
+          .
+        </div>
+      ))}
       {answer.has_conflicts && (
         <div style={{ ...bannerStyle("#fff7ed", "#c2410c"), marginBottom: "0.5rem" }}>
           Sources disagree on this — both values are shown below with their own citations.
@@ -55,6 +72,14 @@ export default function AnswerMessage({ answer, onCitationClick }: AnswerMessage
           ))}
         </p>
       ))}
+      {versionsUsed.length > 0 && (
+        <div style={{ marginTop: "0.4rem", fontSize: "0.78rem", color: "#64748b" }}>
+          Based on:{" "}
+          {versionsUsed
+            .map((v) => `${v.filename} (v${v.version_number}, ${v.approval_status}${v.is_current ? ", current" : ""})`)
+            .join("; ")}
+        </div>
+      )}
     </div>
   );
 }

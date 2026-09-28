@@ -28,12 +28,26 @@ export interface AnswerResponse {
   clarification_question: string | null;
   // Set when relevant sources exist that the current role can't access.
   restriction_notice?: string | null;
+  // ID-HU-BE-015: which document version(s) the cited sources came from.
+  versions_used?: VersionUsed[];
+}
+
+export interface VersionUsed {
+  document_id: string;
+  filename: string;
+  version_number: number;
+  approval_status: string;
+  is_current: boolean;
+  // Set when the answer used a non-default (e.g. superseded) version.
+  current_version_filename: string | null;
 }
 
 export interface QueryRequest {
   question: string;
   top_k?: number;
   session_id?: string | null;
+  // Scope the question to one specific document version (ID-HU-BE-015).
+  document_id?: string | null;
 }
 
 export interface DocumentOut {
@@ -46,6 +60,11 @@ export interface DocumentOut {
   uploaded_at: string;
   is_current: boolean;
   superseded_by_id: string | null;
+  // ID-HU-BE-015 version control.
+  version_group: string;
+  version_number: number;
+  approval_status: string; // "draft" | "approved"
+  approved_at: string | null;
   confidentiality_tag: string;
   sheet_names: string[];
 }
