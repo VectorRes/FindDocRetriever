@@ -10,8 +10,13 @@ Two layers on purpose:
     statement that lacks a valid citation has already been dropped.
 """
 from dataclasses import dataclass, field
+from typing import Literal
 
 from pydantic import BaseModel, Field
+
+from app.escalation import TOPICS, EscalationSuggestion
+
+Topic = Literal[TOPICS]  # type: ignore[valid-type]
 
 
 class LLMCitation(BaseModel):
@@ -60,6 +65,75 @@ class LLMGroundedAnswer(BaseModel):
             "the question at all. When true, statements should be empty."
         ),
     )
+    self_confidence: Literal["high", "medium", "low"] = Field(
+        default="high",
+        description=(
+            "How directly the SOURCES answer the question. 'high': the sources state the answer "
+            "explicitly. 'medium': the answer needs combining or light interpretation of what "
+            "the sources state. 'low': the sources only partially or indirectly address it, or "
+            "the question asks for a judgment (e.g. an accounting treatment) the sources don't "
+            "state outright."
+        ),
+    )
+
+
+class LLMTriage(BaseModel):
+    """ID-HU-BE-009: a short, focused pre-check run before answer generation.
+
+    Kept separate from LLMGroundedAnswer on purpose: these checks are far
+    more reliable as their own task than as more rules buried in the
+    generation prompt. The model only reports *facts* about the sources and
+    the question; whether the question is ambiguous is then decided in code
+    (`clarification_for`), not by the model."""
+
+    metric_in_sources: bool = Field(
+        default=False,
+        description="True if the SOURCES contain the figure or fact the QUESTION asks for.",
+    )
+    entities_with_metric: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Each distinct company/subsidiary/entity for which the SOURCES give the requested "
+            "figure (as named in the sources or their file names). Empty if not found or if no "
+            "entity is named."
+        ),
+    )
+    periods_with_metric: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Each distinct period (year, quarter, month, date) for which the SOURCES give the "
+            "requested figure, e.g. ['Q2 2024', 'Q3 2024']. Empty if not found."
+        ),
+    )
+    question_specifies_entity: bool = Field(
+        default=False,
+        description=(
+            "True if the QUESTION, read together with the CONVERSATION HISTORY, names which "
+            "entity it means (a reply to an earlier clarification counts)."
+        ),
+    )
+    question_specifies_period: bool = Field(
+        default=False,
+        description=(
+            "True if the QUESTION, read together with the CONVERSATION HISTORY, names which "
+            "period it means (a reply to an earlier clarification counts)."
+        ),
+    )
+    requires_judgment: bool = Field(
+        default=False,
+        description=(
+            "True when answering needs a professional judgment or recommendation (e.g. how "
+            "revenue should be recognised, which accounting treatment applies, whether something "
+            "is compliant) rather than reporting what the documents state."
+        ),
+    )
+    topic: Topic = Field(
+        default="general",
+        description=(
+            "The finance topic of the question: revenue_recognition, accounting, consolidation, "
+            "tax, treasury, compensation, legal, budget_forecast, or general."
+        ),
+    )
 
 
 @dataclass
@@ -92,6 +166,15 @@ class VersionUsed:
 
 
 @dataclass
+class ConfidenceOut:
+    """ID-HU-BE-009: how much to trust an answer, and why."""
+
+    level: str  # "high" | "medium" | "low"
+    score: float
+    reasons: list[str] = field(default_factory=list)
+
+
+@dataclass
 class GroundedStatement:
     text: str
     citations: list[ResolvedCitation] = field(default_factory=list)
@@ -111,10 +194,14 @@ class GroundedAnswer:
     # The conversation this turn was recorded under (ID-HU-FE-001 follow-up
     # context) — set by qa/service.answer_question once the turn is persisted.
     session_id: str | None = None
-    # Forward-compatible contract for ID-HU-BE-009 (ambiguous-question
-    # clarification, implemented separately): always False/None until that
-    # detection logic lands, so the frontend can build against this shape now.
+    # ID-HU-BE-009: set instead of an answer when the question is ambiguous
+    # given what's in the corpus (missing entity and/or period).
     needs_clarification: bool = False
     clarification_question: str | None = None
+    clarification_options: list[str] = field(default_factory=list)
+    # ID-HU-BE-009: None when there's no answer to rate (clarification or no sources).
+    confidence: ConfidenceOut | None = None
+    # ID-HU-BE-009: suggested team when there's no confident answer.
+    escalation: EscalationSuggestion | None = None
     restriction_notice: str | None = None
     versions_used: list[VersionUsed] = field(default_factory=list)

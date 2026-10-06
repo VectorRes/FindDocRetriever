@@ -40,7 +40,15 @@ def get_recent_history(db: Session, session_id: UUID, limit: int = HISTORY_LIMIT
 
 
 def record_turn(db: Session, session_id: UUID, question: str, answer: GroundedAnswer) -> None:
-    answer_text = " ".join(statement.text for statement in answer.statements) or "(no confident answer found)"
+    if answer.needs_clarification:
+        # Recorded so the analyst's reply ("Subsidiary A, 2024") is read as an
+        # answer to this clarification on the next turn (ID-HU-BE-009).
+        answer_text = f"(asked for clarification) {answer.clarification_question}"
+    else:
+        answer_text = (
+            " ".join(statement.text for statement in answer.statements)
+            or "(no confident answer found)"
+        )
     citations = [
         {
             "source_id": citation.source_id,

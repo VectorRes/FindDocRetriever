@@ -74,7 +74,11 @@ export default function Chat({ onCitationClick, pinnedDocument = null, onClearPi
               <div style={{ color: "#b91c1c", fontSize: "0.9rem" }}>{turn.errorMessage}</div>
             )}
             {turn.status === "done" && turn.answer && (
-              <AnswerMessage answer={turn.answer} onCitationClick={onCitationClick} />
+              <AnswerMessage
+                answer={turn.answer}
+                onCitationClick={onCitationClick}
+                onClarify={isSending ? undefined : handleSubmit}
+              />
             )}
           </div>
         ))}

@@ -100,7 +100,7 @@ describe("AnswerMessage", () => {
     expect(screen.getAllByText(new RegExp(notice))).toHaveLength(1);
   });
 
-  it("shows only the restriction notice when every relevant source was restricted", () => {
+  it("says there's no confident answer, alongside the notice, when every relevant source was restricted", () => {
     render(
       <AnswerMessage
         answer={{
@@ -113,7 +113,7 @@ describe("AnswerMessage", () => {
       />
     );
     expect(screen.getByText(new RegExp(notice))).toBeInTheDocument();
-    expect(screen.queryByText(/couldn't find a reliable answer/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/couldn't find a reliable answer/i)).toBeInTheDocument();
   });
 
   it("says which version the answer used, and flags a non-current one", () => {
@@ -166,5 +166,72 @@ describe("AnswerMessage", () => {
     );
     expect(screen.getByText(/based on/i)).toHaveTextContent("Budget_v2.xlsx (v2, approved, current)");
     expect(screen.queryByText(/not the current version/i)).not.toBeInTheDocument();
+  });
+
+  it("offers the clarification options as buttons that send the reply", async () => {
+    const onClarify = vi.fn();
+    render(
+      <AnswerMessage
+        answer={{
+          ...baseAnswer,
+          needs_clarification: true,
+          clarification_question: "Which subsidiary and period?",
+          clarification_options: ["Andina S.A.S. 2024", "Pacífico S.A. 2024"],
+        }}
+        onCitationClick={vi.fn()}
+        onClarify={onClarify}
+      />
+    );
+    screen.getByRole("button", { name: "Pacífico S.A. 2024" }).click();
+    expect(onClarify).toHaveBeenCalledWith("Pacífico S.A. 2024");
+  });
+
+  it("names the team to consult when there is no confident answer", () => {
+    render(
+      <AnswerMessage
+        answer={{
+          ...baseAnswer,
+          escalation: { team: "Tax", topic: "tax", reason: "No reliable source was found." },
+        }}
+        onCitationClick={vi.fn()}
+      />
+    );
+    expect(screen.getByText(/couldn't find a reliable answer/i)).toHaveTextContent("so no figure is shown");
+    expect(screen.getByText("Tax")).toBeInTheDocument();
+  });
+
+  it("warns on a low-confidence answer, with the reasons and the team to consult", () => {
+    render(
+      <AnswerMessage
+        answer={{
+          ...baseAnswer,
+          grounded: true,
+          statements: [{ text: "The contract has a 12-month service component.", citations: [citation], conflicting: false }],
+          confidence: { level: "low", score: 0.55, reasons: ["The sources only partially or indirectly address the question"] },
+          escalation: { team: "Accounting/Consolidation", topic: "revenue_recognition", reason: "Low confidence." },
+        }}
+        onCitationClick={vi.fn()}
+      />
+    );
+    expect(screen.getByText(/low confidence\./i)).toBeInTheDocument();
+    expect(screen.getByText(/only partially or indirectly/i)).toBeInTheDocument();
+    expect(screen.getByText("Accounting/Consolidation")).toBeInTheDocument();
+    expect(screen.getByText("low confidence")).toBeInTheDocument();
+  });
+
+  it("shows a high-confidence badge without a warning", () => {
+    render(
+      <AnswerMessage
+        answer={{
+          ...baseAnswer,
+          grounded: true,
+          statements: [{ text: "Q3 revenue was 100.", citations: [citation], conflicting: false }],
+          confidence: { level: "high", score: 1, reasons: [] },
+        }}
+        onCitationClick={vi.fn()}
+      />
+    );
+    expect(screen.getByText("high confidence")).toBeInTheDocument();
+    expect(screen.queryByText(/verify this answer/i)).not.toBeInTheDocument();
   });
 });

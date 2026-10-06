@@ -43,6 +43,10 @@ def query_answer(
     ID-HU-BE-015: answers use each document's default (latest approved)
     version; `versions_used` says which. Pass `document_id` to ask about one
     specific version instead, e.g. a superseded one for audit.
+
+    ID-HU-BE-009: an ambiguous question returns `needs_clarification` with
+    options instead of an answer; every answer carries `confidence`, and
+    `escalation` suggests a team when there's no confident answer.
     """
     return answer_question(
         db,

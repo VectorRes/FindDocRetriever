@@ -128,6 +128,22 @@ class StatementOut(BaseModel):
     notice: bool = False
 
 
+class ConfidenceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    level: str  # "high" | "medium" | "low"
+    score: float
+    reasons: list[str] = []
+
+
+class EscalationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    team: str
+    topic: str
+    reason: str
+
+
 class AnswerResponse(BaseModel):
     """Response for ID-HU-BE-008: a grounded answer, every statement cited."""
 
@@ -138,15 +154,21 @@ class AnswerResponse(BaseModel):
     sources: list[CitationOut]
     has_conflicts: bool
     # False when no statement could be safely grounded (e.g. no relevant sources
-    # were retrieved at all) — see ID-HU-BE-009 for the fuller "no confident
-    # answer" / clarification flow built on top of this signal.
+    # were retrieved, or every statement failed citation/figure verification):
+    # the "no confident answer" response of ID-HU-BE-009.
     grounded: bool
     # Pass this back as session_id on the next QueryRequest to continue the
     # conversation with follow-up context (ID-HU-FE-001).
     session_id: UUID
-    # Set by ID-HU-BE-009 (implemented separately); always False/None for now.
+    # ID-HU-BE-009: set instead of an answer when the question is ambiguous
+    # (missing entity and/or period); options are the choices found in sources.
     needs_clarification: bool = False
     clarification_question: str | None = None
+    clarification_options: list[str] = []
+    # ID-HU-BE-009: how much to trust the answer (None when there is no answer).
+    confidence: ConfidenceOut | None = None
+    # ID-HU-BE-009: team to consult when there's no confident answer.
+    escalation: EscalationOut | None = None
     restriction_notice: str | None = None
     # ID-HU-BE-015: which document version(s) the cited sources came from.
     versions_used: list[VersionUsedOut] = []

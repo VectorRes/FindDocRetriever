@@ -12,7 +12,7 @@ import openpyxl
 import app.qa.graph as qa_graph_module
 from app.db.models import ConversationSession
 from app.ingestion.service import ingest_excel_file
-from app.qa.schemas import LLMCitation, LLMGroundedAnswer, LLMStatement
+from app.qa.schemas import LLMCitation, LLMGroundedAnswer, LLMStatement, LLMTriage
 from app.qa.service import answer_question
 
 # fake_embeddings and db_session fixtures come from conftest.py
@@ -34,6 +34,10 @@ class _RecordingChatModel:
         self._prompts = prompts
 
     def with_structured_output(self, schema):
+        if schema is LLMTriage:
+            # ID-HU-BE-009's pre-check: not ambiguous, and not recorded, so
+            # `prompts` holds only the answer-generation prompts.
+            return _RecordingStructuredLLM(LLMTriage(), [])
         return _RecordingStructuredLLM(self._response, self._prompts)
 
 
@@ -62,7 +66,12 @@ def test_follow_up_question_receives_prior_turn_as_history(monkeypatch, tmp_path
         prompts: list[str] = []
         raw = LLMGroundedAnswer(
             statements=[
-                LLMStatement(text="Revenue was 120,000.", citations=[LLMCitation(source_id="S1")])
+                # Cites both retrieved chunks: their order isn't guaranteed, and
+                # BE-009's figure check needs the cited sources to contain 120,000.
+                LLMStatement(
+                    text="Revenue was 120,000.",
+                    citations=[LLMCitation(source_id="S1"), LLMCitation(source_id="S2")],
+                )
             ]
         )
         _patch_llm(monkeypatch, raw, prompts)

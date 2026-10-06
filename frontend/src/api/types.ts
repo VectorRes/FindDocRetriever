@@ -30,6 +30,24 @@ export interface AnswerResponse {
   restriction_notice?: string | null;
   // ID-HU-BE-015: which document version(s) the cited sources came from.
   versions_used?: VersionUsed[];
+  // ID-HU-BE-009: choices found in the sources for an ambiguous question.
+  clarification_options?: string[];
+  // ID-HU-BE-009: null when there is no answer to rate.
+  confidence?: Confidence | null;
+  // ID-HU-BE-009: team to consult when there's no confident answer.
+  escalation?: EscalationSuggestion | null;
+}
+
+export interface Confidence {
+  level: "high" | "medium" | "low";
+  score: number;
+  reasons: string[];
+}
+
+export interface EscalationSuggestion {
+  team: string;
+  topic: string;
+  reason: string;
 }
 
 export interface VersionUsed {

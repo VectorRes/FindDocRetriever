@@ -122,12 +122,44 @@ momento de migrar). Para comparar `openai` vs `local`, lo más simple es usar ba
   (`statements[]`, cada uno con `citations[]`), `grounded` (`false` = "no
   encontré una respuesta confiable"), y `session_id` — pasalo de vuelta en la
   siguiente pregunta para mantener contexto conversacional (resolución de
-  pronombres/referencias implícitas tipo "¿y el trimestre pasado?"). Incluye
-  también `needs_clarification`/`clarification_question`, el contrato para
-  ID-HU-BE-009 (detección de ambigüedad) — siempre `false`/`null` hasta que esa
-  historia se implemente. `versions_used[]` indica qué versión de cada documento
-  citado se usó; `document_id` (opcional en el request) limita la pregunta a una
-  versión específica — ver [Control de versiones](#control-de-versiones-id-hu-be-015).
+  pronombres/referencias implícitas tipo "¿y el trimestre pasado?").
+  `confidence`, `needs_clarification`/`clarification_question`/`clarification_options`
+  y `escalation` vienen de ID-HU-BE-009 — ver
+  [Confianza, ambigüedad y escalamiento](#confianza-ambigüedad-y-escalamiento-id-hu-be-009).
+  `versions_used[]` indica qué versión de cada documento citado se usó;
+  `document_id` (opcional en el request) limita la pregunta a una versión
+  específica — ver [Control de versiones](#control-de-versiones-id-hu-be-015).
+
+### Confianza, ambigüedad y escalamiento (ID-HU-BE-009)
+
+El pipeline de QA (`qa/graph.py`) es `triage -> (clarify | generate -> ground_and_validate)`:
+
+- **Triage** (una llamada corta al LLM antes de generar): reporta *hechos* sobre
+  las fuentes recuperadas — si contienen la métrica pedida, para qué entidades y
+  periodos aparece, si la pregunta (con su historial) ya especifica entidad o
+  periodo, si pide un juicio profesional (p. ej. un tratamiento contable) y el
+  tema. **La decisión de ambigüedad la toma el código** (`clarification_for`):
+  si la métrica aparece para más de una entidad o periodo y la pregunta no dice
+  cuál, la respuesta es `needs_clarification=true` con `clarification_question`
+  y hasta 6 `clarification_options` sacadas de las fuentes, en vez de adivinar.
+  Una métrica que no está en las fuentes nunca es "ambigua". Si el triage falla,
+  se responde igual (sin esos chequeos).
+- **Sin respuesta confiable:** `grounded=false` y ninguna cifra. Además de
+  descartar afirmaciones sin cita válida, se descarta toda afirmación con una
+  cifra que **no aparece en la fuente que cita** (tolera redondeo, formatos
+  `1,234.5`/`1.234,5` y "3.4 millones"; ignora años y números < 100 sin decimales).
+- **`confidence`** (`level` high/medium/low, `score` 0–1, `reasons[]`) para cada
+  respuesta, a partir de: afirmaciones descartadas, cifras no verificadas,
+  autoconfianza del modelo, si la pregunta pide un juicio profesional, y la
+  relevancia de las fuentes citadas cuando el retrieval provea `score` (ver
+  [handoff de BE-007](docs/HANDOFF_BE-007_BE-010.md)).
+- **`escalation`** (`team`, `topic`, `reason`) cuando no hay respuesta o la
+  confianza es baja. El mapeo tema → equipo está en `app/escalation.py`
+  (`TOPIC_TEAMS`, editable): reconocimiento de ingresos / contabilidad /
+  consolidación → Accounting/Consolidation, impuestos → Tax, caja/FX/deuda →
+  Treasury, nómina → HR/Compensation, litigios → Legal, presupuesto → FP&A, y
+  el resto → Financial Reporting. Solo se *sugiere* el equipo; crear el ticket
+  es ID-HU-INT-008.
 
 ### Control de versiones (ID-HU-BE-015)
 
@@ -342,6 +374,7 @@ backend/app/
   db/models.py             # Document, Sheet, Cell, NamedRange, PdfTable, PdfReference, Chunk,
                             # ConversationSession, ConversationMessage
   versioning.py             # ID-HU-BE-015: grupos de versiones, aprobación, versión por defecto
+  escalation.py             # ID-HU-BE-009: tema -> equipo de escalamiento (lo reutiliza FE-003)
   schemas.py                # DTOs Pydantic de la API (incluye PdfStructureResponse, AnswerResponse,
                              # DocumentResolutionOut, CellOut)
   ingestion/
@@ -354,8 +387,9 @@ backend/app/
   embeddings/                # proveedor intercambiable (openai / local)
   retrieval/                  # búsqueda por similitud en pgvector
   qa/
-    graph.py                   # pipeline LangGraph: generate -> ground_and_validate
-    prompts.py                   # system prompt + construcción del prompt (incluye historial)
+    graph.py                   # pipeline LangGraph: triage -> (clarify | generate -> ground_and_validate)
+    confidence.py                # ID-HU-BE-009: verificación de cifras + puntaje de confianza
+    prompts.py                   # system prompt, prompt de triage + construcción del prompt (incluye historial)
     conversation.py                # sesión/historial de conversación (ID-HU-FE-001)
     service.py                       # orquesta retrieval -> QA graph -> persistencia del turno
   api/
