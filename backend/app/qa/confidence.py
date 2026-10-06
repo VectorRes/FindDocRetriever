@@ -88,6 +88,44 @@ def _matches(stated: set[float], source_values: set[float]) -> bool:
     return False
 
 
+def primary_reading(token: str) -> float:
+    """The most plausible single value of a number token, for when one value
+    is needed rather than all readings: the last of ',' / '.' is the decimal
+    mark; a lone separator followed by groups of exactly 3 digits is a
+    thousands separator ("81,000", "4.820.000"), unless the number starts
+    with 0 ("0.125")."""
+    negative = token.startswith("-")
+    digits = token.lstrip("-")
+    if "," in digits and "." in digits:
+        decimal = "," if digits.rfind(",") > digits.rfind(".") else "."
+    elif "," in digits or "." in digits:
+        separator = "," if "," in digits else "."
+        is_grouping = re.fullmatch(rf"\d{{1,3}}(\{separator}\d{{3}})+", digits) and not digits.startswith("0")
+        decimal = None if is_grouping else separator
+    else:
+        decimal = None
+    thousands = {",", "."} - {decimal}
+    normalized = "".join(ch for ch in digits if ch not in thousands)
+    if decimal:
+        normalized = normalized.replace(decimal, ".")
+    value = float(normalized)
+    return -value if negative else value
+
+
+def match_figure(value_text: str, source_text: str) -> float | None:
+    """The value of `value_text` (its primary reading) if that figure appears
+    in `source_text`, else None. Used by ID-HU-FE-003's figure extraction so
+    a compared value is always one the source actually contains."""
+    match = _NUMBER.search(value_text)
+    if match is None:
+        return None
+    value = primary_reading(match.group())
+    source_values: set[float] = set()
+    for _, values in _figures(source_text):
+        source_values |= values
+    return value if _matches({value}, source_values) else None
+
+
 def unverified_figures(statement: GroundedStatement) -> list[str]:
     """Figures in `statement` that don't appear in any source it cites."""
     source_values: set[float] = set()

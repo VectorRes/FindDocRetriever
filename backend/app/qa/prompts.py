@@ -71,7 +71,7 @@ def label_chunks(chunks: list[RetrievedChunk]) -> dict[str, RetrievedChunk]:
     return {f"S{i + 1}": chunk for i, chunk in enumerate(chunks)}
 
 
-def _describe_location(chunk: RetrievedChunk) -> str:
+def describe_location(chunk: RetrievedChunk) -> str:
     parts = [chunk.document_filename]
     if chunk.sheet_name:
         parts.append(f"sheet '{chunk.sheet_name}'")
@@ -99,7 +99,7 @@ def build_triage_prompt(
     lines += [f"QUESTION: {question}", "", "SOURCES:"]
     for source_id, chunk in source_map.items():
         excerpt = " ".join(chunk.text.split())[:220]
-        lines.append(f"[{source_id}] ({_describe_location(chunk)}) {excerpt}")
+        lines.append(f"[{source_id}] ({describe_location(chunk)}) {excerpt}")
     return "\n".join(lines)
 
 
@@ -126,7 +126,7 @@ def build_user_prompt(
         ]
     lines.append("SOURCES:")
     for source_id, chunk in source_map.items():
-        lines.append(f"[{source_id}] ({_describe_location(chunk)})")
+        lines.append(f"[{source_id}] ({describe_location(chunk)})")
         lines.append(chunk.text.strip())
         lines.append("")
     return "\n".join(lines)

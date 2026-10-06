@@ -1,6 +1,8 @@
 import type {
   AnswerResponse,
   CellOut,
+  CompareRequest,
+  Comparison,
   DocumentListOut,
   DocumentOut,
   DocumentResolutionOut,
@@ -199,4 +201,46 @@ export async function postQueryAnswer(request: QueryRequest): Promise<AnswerResp
   } finally {
     clearTimeout(timeout);
   }
+}
+
+// ID-HU-FE-003. One model call per document, so allow more time than a single answer.
+const COMPARE_TIMEOUT_MS = 90_000;
+
+export async function compareDocuments(request: CompareRequest): Promise<Comparison> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), COMPARE_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${API_URL}/compare`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...roleHeaders() },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      throw new ApiError(detail || `Comparison failed with status ${res.status}`, "http", res.status);
+    }
+    return (await res.json()) as Comparison;
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new ApiError("The comparison took too long to respond.", "timeout");
+    }
+    throw new ApiError("Could not reach the FinDoc Retriever API.", "network");
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// Excel export of the comparison on screen (posted back, not recomputed).
+export async function exportComparison(comparison: Comparison): Promise<Blob> {
+  const res = await fetch(`${API_URL}/compare/export.xlsx`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(comparison),
+  });
+  if (!res.ok) {
+    throw new ApiError(`Export failed with status ${res.status}`, "http", res.status);
+  }
+  return res.blob();
 }

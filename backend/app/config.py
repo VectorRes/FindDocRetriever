@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     retrieval_top_k: int = 8
+    # ID-HU-FE-003: relative difference below which compared values count as
+    # reconciling (0.001 = 0.1%, absorbs rounding but flags a 0.5% gap).
+    comparison_tolerance: float = 0.001
 
     # Comma-separated list of origins allowed to call the API (the frontend dev server, etc.)
     cors_allowed_origins_raw: str = "http://localhost:5173"

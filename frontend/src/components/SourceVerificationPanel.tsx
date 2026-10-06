@@ -64,7 +64,7 @@ export default function SourceVerificationPanel({ citation, onClose }: SourceVer
   }, [status, resolution, documentId, citation.sheet_name, citation.cell_range]);
 
   return (
-    <aside style={panelStyle}>
+    <aside className="no-print" style={panelStyle}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <h2 style={{ fontSize: "1rem", margin: 0 }}>Source</h2>
         <button type="button" onClick={onClose} style={closeButtonStyle} aria-label="Close">

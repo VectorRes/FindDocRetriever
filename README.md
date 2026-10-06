@@ -199,6 +199,35 @@ Endpoints:
 Los documentos existentes antes de la migración `0012_version_control` quedan
 como `approved` (ya se estaban usando para responder).
 
+### Comparación entre documentos (ID-HU-FE-003)
+
+- `POST /compare` — `{"document_ids": [...2 a 6...], "metric": "net income", "period": <opcional>}`
+  (respeta `X-User-Role`). El primer documento es la **base**. Por cada
+  documento se extrae la cifra (`app/figures/extraction.py::extract_figure`):
+  búsqueda solo dentro de ese documento, el LLM indica qué fuente tiene la cifra
+  y la copia tal como está escrita, y **el código verifica que ese número
+  aparezca en la fuente** — si no, la fila sale como "no encontrada", nunca
+  inventada. Una escala ("en miles", "in millions") solo se aplica si el texto
+  del documento la menciona. Respuesta: `rows[]` (valor, moneda, periodo,
+  etiqueta, cita, confianza, variación absoluta y % contra la base),
+  `reconciles`, `across_periods`, `exchange_rates[]`, `notes[]` y `escalation`.
+  - **Mismo periodo** (p. ej. utilidad neta en el estado de resultados vs. el
+    flujo de caja del Q1): se evalúa si concilian, con tolerancia relativa
+    `COMPARISON_TOLERANCE` (default `0.001` = 0.1 %, absorbe redondeo pero marca
+    4,820,000 vs. 4,795,000). Si no concilian → `reconciles=false` y se sugiere
+    escalar a Accounting/Consolidation.
+  - **Periodos distintos** (p. ej. ingresos 2024 vs. 2025): solo variación,
+    `across_periods=true`, sin veredicto de conciliación ni escalamiento.
+  - **Monedas distintas**: se muestran los valores originales y se busca una
+    **tasa de cambio documentada** en el corpus (con su cita); si existe, se
+    convierte a la moneda de la base; si no, se avisa y no se convierte (nunca
+    se usa una tasa "de mercado").
+- `POST /compare/export.xlsx` — recibe el resultado de `/compare` tal como se
+  muestra en pantalla (no lo recalcula) y devuelve un Excel con valores,
+  variaciones, citas, tasas de cambio, notas y la sugerencia de escalamiento.
+  La exportación a PDF es la impresión del navegador ("Save as PDF"), con una
+  hoja de estilos de impresión que deja solo la tabla.
+
 ### Confidentialidad y control de acceso
 
 Los documentos y chunks nuevos se clasifican como `restricted` por defecto.
@@ -264,6 +293,13 @@ Docker Desktop sobre Windows, donde los bind mounts no reenvían eventos `inotif
   advertencia con botón para cambiar a la versión vigente si el documento fue
   superado; bloqueo con mensaje de permisos si está `restricted`; botón para
   abrir el archivo original.
+- **Comparación (ID-HU-FE-003)**: pestaña "Compare",
+  `frontend/src/components/ComparisonView.tsx` — selector de 2 a 6 documentos
+  (el primero seleccionado es la base), métrica con sugerencias y periodo
+  opcional; tabla lado a lado con valor, valor comparado, variación absoluta y
+  %, y la cita de cada valor (abre el panel de fuente); las filas que no
+  concilian se resaltan en rojo con el equipo sugerido; botones "Export to
+  Excel" y "Save as PDF".
 
 ## Probar con un PDF de ejemplo
 
@@ -375,6 +411,10 @@ backend/app/
                             # ConversationSession, ConversationMessage
   versioning.py             # ID-HU-BE-015: grupos de versiones, aprobación, versión por defecto
   escalation.py             # ID-HU-BE-009: tema -> equipo de escalamiento (lo reutiliza FE-003)
+  figures/
+    extraction.py           # ID-HU-FE-003: extract_figure (compartido con BE-010) + tasas de cambio documentadas
+    comparison.py             # variaciones, conciliación, monedas (aritmética determinística)
+    export.py                   # Excel de la comparación
   schemas.py                # DTOs Pydantic de la API (incluye PdfStructureResponse, AnswerResponse,
                              # DocumentResolutionOut, CellOut)
   ingestion/
@@ -395,6 +435,7 @@ backend/app/
   api/
     routes_ingest.py           # POST /ingest
     routes_query.py              # POST /query, POST /query/answer, GET /documents/{id}/pdf-structure
+    routes_compare.py              # POST /compare, POST /compare/export.xlsx
     routes_documents.py            # GET /documents/{id}/resolve, /cells/{sheet}/{address}, /file,
                                     # /versions, POST /approve, /supersede, PATCH /confidentiality
 

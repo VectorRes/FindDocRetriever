@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.routes_compare import router as compare_router
 from app.api.routes_documents import router as documents_router
 from app.api.routes_ingest import router as ingest_router
 from app.api.routes_query import router as query_router
@@ -19,6 +20,7 @@ app.add_middleware(
 app.include_router(ingest_router, tags=["ingestion"])
 app.include_router(query_router, tags=["retrieval"])
 app.include_router(documents_router, tags=["documents"])
+app.include_router(compare_router, tags=["comparison"])
 
 
 @app.get("/health")

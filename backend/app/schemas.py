@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class DocumentOut(BaseModel):
@@ -209,3 +209,63 @@ class SupersedeRequest(BaseModel):
 
 class ConfidentialityRequest(BaseModel):
     tag: str
+
+
+# --- ID-HU-FE-003: cross-document comparison --------------------------------
+
+class CompareRequest(BaseModel):
+    # Two to six documents; the first one is the baseline variances are measured against.
+    document_ids: list[UUID] = Field(min_length=2, max_length=6)
+    metric: str = Field(min_length=1, max_length=200)
+    # Optional: which period to take when a document holds several.
+    period: str | None = None
+
+
+class ExchangeRateOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    from_currency: str
+    to_currency: str
+    rate: float
+    rate_text: str
+    citation: CitationOut
+
+
+class ComparisonRowOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    document_id: UUID
+    filename: str
+    version_number: int
+    is_current: bool
+    is_baseline: bool
+    found: bool
+    value: float | None = None
+    value_text: str | None = None
+    unit_scale: str = "units"
+    currency: str | None = None
+    period: str | None = None
+    label: str | None = None
+    citation: CitationOut | None = None
+    confidence: str = "low"
+    reason: str | None = None
+    comparable_value: float | None = None
+    converted: bool = False
+    variance_abs: float | None = None
+    variance_pct: float | None = None
+    matches_baseline: bool | None = None
+
+
+class ComparisonOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    metric: str
+    period: str | None = None
+    rows: list[ComparisonRowOut]
+    reconciles: bool | None
+    # Values for different periods: variance only, no reconciliation expected.
+    across_periods: bool = False
+    comparison_currency: str | None = None
+    exchange_rates: list[ExchangeRateOut] = []
+    notes: list[str] = []
+    escalation: EscalationOut | None = None

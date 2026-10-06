@@ -110,3 +110,57 @@ export interface CellOut {
   formula: string | null;
   formula_references: string[];
 }
+
+// --- ID-HU-FE-003: cross-document comparison ---
+
+export interface CompareRequest {
+  // First document is the baseline variances are measured against.
+  document_ids: string[];
+  metric: string;
+  period?: string | null;
+}
+
+export interface ExchangeRate {
+  from_currency: string;
+  to_currency: string;
+  rate: number; // 1 from_currency = rate to_currency
+  rate_text: string;
+  citation: CitationOut;
+}
+
+export interface ComparisonRow {
+  document_id: string;
+  filename: string;
+  version_number: number;
+  is_current: boolean;
+  is_baseline: boolean;
+  found: boolean;
+  value: number | null;
+  value_text: string | null;
+  unit_scale: string;
+  currency: string | null;
+  period: string | null;
+  label: string | null;
+  citation: CitationOut | null;
+  confidence: string;
+  reason: string | null;
+  comparable_value: number | null;
+  converted: boolean;
+  variance_abs: number | null;
+  variance_pct: number | null;
+  matches_baseline: boolean | null;
+}
+
+export interface Comparison {
+  metric: string;
+  period: string | null;
+  rows: ComparisonRow[];
+  // null: can't tell (fewer than two comparable values, or no documented exchange rate).
+  reconciles: boolean | null;
+  // Values for different periods: variance only, no reconciliation expected.
+  across_periods: boolean;
+  comparison_currency: string | null;
+  exchange_rates: ExchangeRate[];
+  notes: string[];
+  escalation: EscalationSuggestion | null;
+}
