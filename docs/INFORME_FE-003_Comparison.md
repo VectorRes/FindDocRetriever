@@ -67,3 +67,9 @@ Las pruebas con el LLM real destaparon que el modelo **inventaba la escala**: de
 3. **La conversión de moneda solo usa tasas que estén escritas en los documentos subidos.** Si no hay ninguna, la conciliación queda "no determinable".
 4. **La cita apunta a la fila completa del Excel** (`A3:B3`), por la misma brecha de FE-002: los chunks de Excel son por fila.
 5. **No se revisó visualmente en el navegador.** La vista está cubierta por tests de componentes y el build, pero conviene que alguien del equipo la mire antes de la demo.
+6. **⚠ Posible punto de falla: falsos negativos en la verificación de cifras (pendiente de investigar).** En una prueba manual con el estado financiero real `EEFF EL ECLIPSE S.A.S DICIEMBRE 2024.xlsx` (v1 y v2), la métrica "Operating cash flow" salió como *"The extracted figure couldn't be found in its source"* en ambas versiones. Ese mensaje no significa que el dato falte: si faltara, diría *"This document doesn't state…"*. Significa que el LLM propuso una cifra y la verificación la rechazó porque el número no aparece tal cual en la fuente citada. El sistema no muestra una cifra no verificada, que es lo correcto, pero con documentos reales la comparación puede quedar vacía.
+   - **Causas probables (sin confirmar):**
+     - el modelo escribe el número distinto a la fuente (redondeado, o con `$`, espacios o separadores);
+     - toma un valor de otra fila o columna;
+     - el Excel guarda la cifra en un formato que `match_figure` no reconoce.
+   - **Cómo investigarlo:** registrar el `value_text` y el `source_id` que propone el modelo y compararlos con el texto del chunk citado. Luego ajustar la verificación o el prompt **sin aflojar la garantía de no inventar cifras**.
