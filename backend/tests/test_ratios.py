@@ -104,7 +104,7 @@ class FakeExtractor:
         self.overrides = overrides or {}  # {key: {ExtractedFigure field: value}}
         self.calls = []
 
-    def __call__(self, db, document_id, metric, user_roles=None, user_id=None, period=None):
+    def __call__(self, db, document_id, metric, user_roles=None, user_id=None, period=None, **_):
         self.calls.append((document_id, metric))
         document = next(d for d in self.tables if d.id == document_id)
         key = next(k for k, item in LINE_ITEMS.items() if item.query == metric)
@@ -185,8 +185,11 @@ def test_non_standard_labels_are_not_accepted(key, label):
 
 
 def test_normalize_label_drops_accents_years_and_total():
-    assert normalize_label("Total Pasivos Corrientes (Nota 12) 2024") == "pasivos corrientes"
+    assert normalize_label("Total Pasivos Corrientes (Nota 12) 2024") == "pasivo corriente"
     assert normalize_label("Situación financiera") == "situacion financiera"
+    # Singular and plural compare equal.
+    assert normalize_label("Efectivo y equivalente de efectivo") == normalize_label("Efectivo y equivalentes de efectivo")
+    assert normalize_label("Inventories") == normalize_label("Inventory")
 
 
 def test_statement_hints_order_documents(statements):

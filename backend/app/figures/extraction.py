@@ -12,6 +12,7 @@ as not found; it is never invented.
 """
 import logging
 import re
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from typing import Literal
 from uuid import UUID
@@ -25,6 +26,7 @@ from app.qa.confidence import match_figure, primary_reading
 from app.qa.llm import get_chat_model
 from app.qa.prompts import describe_location, label_chunks
 from app.qa.schemas import ResolvedCitation
+from app.ratios.mapping import normalize_label
 from app.retrieval.access import can_access, parse_roles
 from app.retrieval.service import RetrievedChunk, retrieve
 
@@ -131,7 +133,10 @@ is given; otherwise use the most recent one (when there are both \
 quarterly and year-to-date columns, the most recent quarter) and list the \
 others in other_periods.
 - Prefer the consolidated total for the whole entity over segment, \
-geographic or product breakdowns of the same line item.
+geographic or product breakdowns of the same line item, and the primary \
+financial statement's row over notes, highlights or narrative text. The \
+first SOURCES are the document's table rows labelled with the METRIC's \
+standard name, when it has any.
 - Statements often have both quarterly and year-to-date columns (e.g. \
 "Three Months Ended" and "Nine Months Ended"). Copy the header of the column \
 the value is under into column_header and say what it covers in \
@@ -208,8 +213,25 @@ _LEGAL_FORM = re.compile(
 
 
 def entity_key(value: str) -> str:
-    """A company name normalized for comparison (case, punctuation, legal form)."""
-    return " ".join(re.sub(r"[^\w\s]", " ", _LEGAL_FORM.sub(" ", value.lower())).split())
+    """A company name normalized for comparison (case, punctuation, legal
+    form, a web domain: "Amazon.com, Inc." -> "amazon")."""
+    value = re.sub(r"\.(com|net|org|io)\b", " ", value.lower())
+    return " ".join(re.sub(r"[^\w\s]", " ", _LEGAL_FORM.sub(" ", value)).split())
+
+
+_NO_ENTITY = {"", "not specified", "unspecified", "unknown", "not stated", "not mentioned", "n a", "na", "none", "null"}
+
+
+def known_entity(value: str | None) -> str | None:
+    """The entity, or None when the model wrote a placeholder ("Not specified")."""
+    return None if value is None or entity_key(value) in _NO_ENTITY else value
+
+
+def same_entity(a: str, b: str) -> bool:
+    """Whether two names are the same company: equal once normalized, or one
+    is the other with more words ("Andina" / "Andina Holdings")."""
+    words_a, words_b = set(entity_key(a).split()), set(entity_key(b).split())
+    return bool(words_a and words_b) and (words_a <= words_b or words_b <= words_a)
 
 
 _MONTHS = {
@@ -226,8 +248,15 @@ def period_aliases(period: str | None) -> set[str]:
     if not key:
         return set()
     aliases = {key}
+    numeric = re.search(r"(?<!\d)(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})(?!\d)", period or "")
     match = re.search(r"\b([a-z]{3})[a-z]* (\d{1,2}) (\d{4})\b", key)  # june 30 2026
-    if match:
+    if numeric and (int(numeric.group(1)) > 12 or int(numeric.group(2)) > 12):
+        # 31/12/2024 (day first) or 12/31/2024 (month first): the day is the part above 12.
+        first, second = int(numeric.group(1)), int(numeric.group(2))
+        day, month_number = (first, second) if first > 12 else (second, first)
+        month = next((name for name, number in _MONTHS.items() if number == month_number), None)
+        year = numeric.group(3)
+    elif match:
         month, day, year = match.group(1), int(match.group(2)), match.group(3)
     else:
         # 30 de junio de 2026 / 31 December 2025
@@ -414,7 +443,6 @@ def _labelled_rows_with(
     number = _NUMBER_TOKEN.search(value_text)
     if number is None:
         return {}
-    roles = parse_roles(user_roles)
     found = db.scalars(
         select(Chunk).where(
             Chunk.document_id == document.id,
@@ -422,11 +450,23 @@ def _labelled_rows_with(
             Chunk.text.contains(number.group()),
         ).limit(MAX_ROW_LOOKUP * 4)
     ).all()
+    return _as_sources(db, document, found, user_roles, user_id, question, "R", MAX_ROW_LOOKUP)
+
+
+def _as_sources(
+    db: Session, document: Document, chunks, user_roles: str | None, user_id: str | None, question: str,
+    prefix: str, limit: int,
+) -> dict[str, RetrievedChunk]:
+    """Chunks looked up directly in the document, as sources ("R1"…),
+    access-checked and audited like retrieval."""
+    from app.db.models import RetrievalAuditLog
+
+    roles = parse_roles(user_roles)
     rows: dict[str, RetrievedChunk] = {}
-    for chunk in found:
-        if len(rows) >= MAX_ROW_LOOKUP or not can_access(chunk.confidentiality_tag, roles):
+    for chunk in chunks:
+        if len(rows) >= limit or not can_access(chunk.confidentiality_tag, roles):
             continue
-        rows[f"R{len(rows) + 1}"] = RetrievedChunk(
+        rows[f"{prefix}{len(rows) + 1}"] = RetrievedChunk(
             chunk_id=str(chunk.id), document_id=str(chunk.document_id), document_filename=document.filename,
             sheet_name=chunk.sheet_name, cell_range=chunk.cell_range, page_number=chunk.page_number,
             text=chunk.text, content_type=chunk.content_type, extraction_method=chunk.extraction_method,
@@ -441,6 +481,195 @@ def _labelled_rows_with(
     if rows:
         db.flush()
     return rows
+
+
+MAX_LABELLED_ROWS = 6
+
+
+def _row_label_keys(label: str) -> set[str]:
+    """A row label's comparable forms: whole, and without its section
+    ("Current assets: Inventories" -> also "inventories")."""
+    return {normalize_label(label), normalize_label(label.rsplit(":", 1)[-1])} - {""}
+
+
+def rows_labelled(
+    db: Session, document: Document, labels: Collection[str], exclude: Collection[str],
+    user_roles: str | None, user_id: str | None, question: str,
+) -> tuple[dict[str, RetrievedChunk], bool]:
+    """Table rows of `document` labelled with one of `labels` (the metric's
+    standard names), so the statement line itself is a source even when
+    similarity search ranks a note, a segment table or narrative text above
+    it. Exact label matches only, when there are any; otherwise rows whose
+    label starts with a standard name ("Accounts receivable, net and
+    other"). Rows labelled with an `exclude` name (another line item, e.g.
+    "Total liabilities and equity" for total liabilities) never count.
+    Also says whether the rows are exact matches."""
+    from app.db.models import Chunk
+
+    wanted = {normalize_label(label) for label in labels} - {""}
+    unwanted = {normalize_label(label) for label in exclude} - {""}
+    if not wanted:
+        return {}, False
+    exact, prefixed = [], []
+    for chunk in db.scalars(
+        select(Chunk).where(Chunk.document_id == document.id, Chunk.content_type == "table_row")
+        .order_by(Chunk.page_number)
+    ):
+        row_label = source_row_label(chunk.text)
+        if not row_label:
+            continue
+        keys = _row_label_keys(row_label)
+        if keys & (unwanted - wanted) or not _has_period_columns(chunk.text):
+            # A row whose columns aren't labelled with periods ("column 3=…",
+            # or a mangled heading) can't be read reliably: it isn't put first.
+            continue
+        if keys & wanted:
+            exact.append(chunk)
+        elif any(key.startswith(f"{name} ") for key in keys for name in wanted):
+            prefixed.append(chunk)
+    # A total before its components ("Total efectivo y equivalentes" before "Caja y bancos").
+    rows = sorted(exact or prefixed, key=lambda c: not (source_row_label(c.text) or "").lower().startswith("total"))
+    sources = _as_sources(db, document, rows, user_roles, user_id, question, "L", MAX_LABELLED_ROWS)
+    return sources, bool(exact)
+
+
+def _has_period_columns(source_text: str) -> bool:
+    """Every labelled value of the row sits under a heading naming a period
+    (a year or a date), and at least one does."""
+    columns = labelled_columns(source_text)
+    with_year = [label for label, _ in columns if _YEAR_IN_TEXT.search(label)]
+    return bool(with_year) and "column " not in source_text.split("row '", 1)[-1] and all(
+        _YEAR_IN_TEXT.search(label) or _CHANGE_COLUMN.search(label) for label, _ in columns
+    ) and all(_reads_as_period(label) for label in with_year)
+
+
+# Change columns of comparative statements ("Variación absoluta", "% Change").
+_CHANGE_COLUMN = re.compile(r"variaci[oó]n|variation|change|diferencia|\bvar\b", re.IGNORECASE)
+# Words a period heading is made of, in English and Spanish.
+_PERIOD_WORDS = {
+    "january", "february", "march", "april", "may", "june", "july", "august", "september", "october",
+    "november", "december", "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
+    "enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "setiembre",
+    "octubre", "noviembre", "diciembre", "ene", "abr", "ago", "dic",
+    "three", "six", "nine", "twelve", "months", "month", "ended", "ending", "quarter", "quarters", "year",
+    "years", "fiscal", "to", "date", "ytd", "as", "of", "at", "period", "full", "first", "second", "third",
+    "fourth", "half", "tres", "seis", "nueve", "doce", "meses", "terminados", "terminado", "terminadas",
+    "trimestre", "semestre", "año", "años", "ano", "acumulado", "al", "a", "de", "del", "el", "la", "y", "and",
+    "fy", "q", "real", "actual", "budget", "presupuesto", "restated", "reexpresado", "unaudited", "audited",
+}
+
+
+def _reads_as_period(label: str) -> bool:
+    """A column heading made only of a period's words and numbers ("Three
+    Months Ended June 27, 2026", "31/12/2024", "Año 2024"), not one the
+    table grid cut mid-word ("years ended mber")."""
+    words = re.findall(r"[a-záéíóúñ]+", label.lower())
+    return all(word in _PERIOD_WORDS or re.fullmatch(r"q[1-4]|[1-4]?q", word) for word in words)
+
+
+def labelled_columns(source_text: str) -> list[tuple[str, str]]:
+    """The (column label, value as written) pairs of a labelled source row,
+    in order; "column N" positions aren't labels and are left out."""
+    columns = []
+    for match in _LABELLED_VALUE.finditer(source_text):
+        label, raw = match.group(1).strip(), match.group(2).strip()
+        if label and _NUMBER_TOKEN.search(raw) and not re.fullmatch(r"column \d+", label):
+            columns.append((label, raw))
+    return columns
+
+
+_YEAR_TO_DATE = re.compile(r"year to date|year-to-date|\bytd\b|acumulado", re.IGNORECASE)
+_PLAN_COLUMN = re.compile(r"presupuest|budget|forecast|proyecci|projected|plan\b|estimad|target|objetivo", re.IGNORECASE)
+_MONTH_DAY = re.compile(r"\b([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2})\b|\b(\d{1,2})\s+(?:de\s+)?([A-Za-z]{3})[a-z]*")
+_SPAN_RANK = {"point_in_time": 0, "three_months": 1, "six_months": 2, "nine_months": 3, "twelve_months": 4}
+
+
+def _column_end(label: str) -> tuple[int, int, int] | None:
+    """When a column ends (year, month, day); a bare year counts as its end."""
+    years = _YEAR_IN_TEXT.findall(label)
+    if not years:
+        return None
+    numeric = re.search(r"(?<!\d)(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})(?!\d)", label)
+    if numeric:
+        first, second = int(numeric.group(1)), int(numeric.group(2))
+        day, month = (second, first) if second > 12 else (first, second)  # day first unless impossible
+        return int(numeric.group(3)), month, day
+    match = _MONTH_DAY.search(label)
+    if match:
+        month = _MONTHS.get((match.group(1) or match.group(4) or "").lower()[:3])
+        day = int(match.group(2) or match.group(3))
+        if month:
+            return int(years[-1]), month, day
+    return int(years[-1]), 12, 31
+
+
+def _span_rank(label: str) -> float:
+    """Shorter spans first (the quarter before year-to-date); unknown last."""
+    if _YEAR_TO_DATE.search(label):
+        return 5
+    return _SPAN_RANK.get(coverage_of(label) or "", 4.5)
+
+
+def _column_fits(label: str, period: str) -> bool:
+    if same_period(label, period):
+        return True
+    years = _YEAR_IN_TEXT.findall(period)
+    return bool(years) and _YEAR_IN_TEXT.findall(label)[-1:] == years[-1:]
+
+
+def statement_row(
+    source_map: dict[str, RetrievedChunk], row_ids: set[str], period: str | None
+) -> tuple[tuple[str, RetrievedChunk], tuple[str, str]] | None:
+    """The metric's statement row (one of `row_ids`) and the column to read,
+    when every such row gives the same value for the period; else None."""
+    picks = []
+    for source_id, chunk in source_map.items():
+        if chunk.chunk_id in row_ids:
+            column = choose_column(labelled_columns(chunk.text), period)
+            if column is None:
+                return None
+            picks.append(((source_id, chunk), column))
+    values = {primary_reading(_NUMBER_TOKEN.search(raw).group()) for _, (_, raw) in picks}
+    return picks[0] if len(values) == 1 else None
+
+
+def stated_scale(text: str) -> str | None:
+    """The scale a source states for its own figures ("(in millions, except
+    per share data)" -> "millions"), when it states exactly one."""
+    found = [scale for scale, pattern in _SCALE_EVIDENCE.items() if pattern.search(text)]
+    return found[0] if len(found) == 1 else None
+
+
+def choose_column(columns: list[tuple[str, str]], period: str | None) -> tuple[str, str] | None:
+    """The column a figure should be read from, decided from the row's own
+    column labels instead of the model's reading: with `period`, the column
+    for that period (and the span it implies: a quarter's three-month
+    column, not year-to-date); without one, the most recent actual column
+    (not a budget), the quarter before year-to-date. None when the labels
+    don't settle it, so the model's choice stands."""
+    if len(columns) < 2:
+        return None
+    if period:
+        expected = expected_coverage(period)
+        candidates = [
+            (label, raw) for label, raw in columns
+            if _column_fits(label, period) and (
+                not expected
+                or coverage_of(label) in expected
+                or (coverage_of(label) is None and not _YEAR_TO_DATE.search(label))
+            )
+        ]
+    else:
+        actual = [(label, raw) for label, raw in columns if not _PLAN_COLUMN.search(label)] or columns
+        ends = {label: _column_end(label) for label, _ in actual}
+        latest = max((end for end in ends.values() if end), default=None)
+        candidates = [(label, raw) for label, raw in actual if latest and ends[label] == latest]
+    if not candidates:
+        return None
+    best = min(_span_rank(label) for label, _ in candidates)
+    chosen = [(label, raw) for label, raw in candidates if _span_rank(label) == best]
+    values = {primary_reading(_NUMBER_TOKEN.search(raw).group()) for _, raw in chosen}
+    return chosen[0] if len(values) == 1 else None
 
 
 def labelled_source(
@@ -479,8 +708,14 @@ def extract_figure(
     user_roles: str | None = "analyst",
     user_id: str | None = "anonymous",
     period: str | None = None,
+    labels: Collection[str] = (),
+    exclude_labels: Collection[str] = (),
 ) -> ExtractedFigure:
-    """The value of `metric` in one document, with its citation (see module docstring)."""
+    """The value of `metric` in one document, with its citation (see module docstring).
+
+    `labels` are the metric's standard line-item names: table rows with one
+    of them are sources even if similarity search misses them, and rows
+    labelled with an `exclude_labels` name are never offered for it."""
     document = db.get(Document, UUID(str(document_id)))
     result = ExtractedFigure(document_id=str(document_id), found=False)
     if document is None:
@@ -495,9 +730,18 @@ def extract_figure(
 
     query = f"{metric} {period}" if period else metric
     try:
+        # No relevance floor: the document is already chosen, and the model
+        # decides below whether the metric is there (a short metric name in
+        # another language than the statement can score low).
         chunks = retrieve(
-            db, question=query, top_k=8, user_roles=user_roles, user_id=user_id, document_id=document.id
+            db, question=query, top_k=8, user_roles=user_roles, user_id=user_id, document_id=document.id,
+            min_score=0,
         )
+        # The statement's own rows for the metric go first.
+        found_rows, exact_rows = rows_labelled(db, document, labels, exclude_labels, user_roles, user_id, query)
+        rows = list(found_rows.values())
+        listed = {row.chunk_id for row in rows}
+        chunks = rows + [chunk for chunk in chunks if chunk.chunk_id not in listed]
         if not chunks:
             result.reason = "No accessible content in this document matches the metric."
             return result
@@ -533,8 +777,30 @@ def extract_figure(
                                    figure.source_id, figure.value_text, figure.label)
     if labelled is not None:
         citation = _citation(*labelled)
+    elif exact_rows and not column_of(figure.value_text, citation.text):
+        # The model quoted text ("$2.3 billion" in the discussion) although the
+        # statement's own row for the metric is a source: use the row, when
+        # its column labels settle which value it is and every such row agrees.
+        row = statement_row(source_map, listed, period)
+        if row is not None:
+            (source_id, chunk), (_, raw) = row
+            reread = match_figure(raw, chunk.text)
+            if reread is not None:
+                value, citation = (-reread if raw.startswith("(") and reread > 0 else reread), _citation(source_id, chunk)
+    # Which column: decided from the row's own column labels when they settle
+    # it. The model picks the wrong one too often to be trusted with it (the
+    # first column when tables run oldest to newest, the nine-month column
+    # for a quarter, the prior year's column), and nothing else would notice.
+    value_text, model_period = figure.value_text, figure.period
+    column = choose_column(labelled_columns(citation.text), period)
+    if column is not None and column_of(value_text, citation.text) != column[0]:
+        reread = match_figure(column[1], citation.text)
+        if reread is not None:
+            value = -reread if column[1].startswith("(") and reread > 0 else reread
+            value_text, model_period = column[1], column[0]
     issues: dict[str, str] = {}
-    unit_scale = figure.unit_scale
+    # The cited source's own statement of scale wins over the model's reading.
+    unit_scale = stated_scale(citation.text) or figure.unit_scale
     if not _documented_scale(unit_scale, source_map):
         unit_scale = "units"
         issues["scale"] = (
@@ -549,7 +815,7 @@ def extract_figure(
         )
     # The column as the source row labels it ("Nine Months Ended June 27,
     # 2026=364,357") beats the model's reading, which often leaves it out.
-    source_column = column_of(figure.value_text, citation.text)
+    source_column = column_of(value_text, citation.text)
     column_header = source_column or figure.column_header
     coverage = coverage_of(source_column) or (
         None if figure.period_coverage == "unknown" else figure.period_coverage
@@ -566,14 +832,14 @@ def extract_figure(
         document_id=str(document.id),
         found=True,
         value=value * UNIT_SCALES[unit_scale],
-        value_text=figure.value_text,
+        value_text=value_text,
         unit_scale=unit_scale,
         currency=(figure.currency or "").upper() or single_currency(citation.text),
-        period=figure.period or single_year(citation.text, figure.value_text),
+        period=model_period or single_year(citation.text, value_text),
         # The row's own label when the source is a table row: the model may name
         # "Cost of sales: Products" as plain "Cost of sales".
         label=(source_row_label(citation.text) if source_column else None) or figure.label,
-        entity=figure.entity,
+        entity=known_entity(figure.entity),
         citation=citation,
         confidence="medium" if issues else "high",
         reason=" ".join(issues.values()) or None,

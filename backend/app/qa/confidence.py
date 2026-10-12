@@ -14,8 +14,8 @@ Combines a few explainable signals into a score in [0, 1] and a level
     sources don't state), which is enough on its own to mark the answer low;
   - whether the question asks for a professional judgment (triage's
     `requires_judgment`), which documents alone can't settle;
-  - retrieval relevance of the cited sources, *when* retrieval provides a
-    `score` per chunk (ID-HU-BE-007's relevance score; ignored until then).
+  - retrieval relevance of the cited sources (ID-HU-BE-007's `score` per
+    chunk; sources without one are ignored).
 """
 import re
 
@@ -24,8 +24,9 @@ from app.qa.schemas import ConfidenceOut, GroundedStatement
 HIGH_THRESHOLD = 0.8
 MEDIUM_THRESHOLD = 0.6
 # Below this average similarity the cited sources are considered weakly
-# related. Placeholder until BE-007 calibrates scores against real embeddings.
-WEAK_RELEVANCE = 0.5
+# related. Retrieval already drops chunks under RETRIEVAL_MIN_SCORE (0.25);
+# with text-embedding-3-small, sources that answer the question score >= 0.33.
+WEAK_RELEVANCE = 0.3
 # Relative tolerance when matching a stated figure to a source figure
 # (covers rounding such as 3,401,234 stated as 3.4 million).
 FIGURE_TOLERANCE = 0.02
@@ -53,9 +54,20 @@ def _interpretations(token: str) -> set[float]:
     return readings
 
 
+# A digit group split off by a space in PDF text ("79 ,975", "100 ,000").
+# Prose puts the space after the comma ("79, 975"), never before it.
+_SPLIT_GROUP = re.compile(r"(\d)\s+([.,]\d{3})(?!\d)")
+
+
+def join_split_groups(text: str) -> str:
+    """'$ 79 ,975' -> '$ 79,975': one figure, not 79 and 975."""
+    return _SPLIT_GROUP.sub(lambda m: m.group(1) + m.group(2), text)
+
+
 def _figures(text: str) -> list[tuple[str, set[float]]]:
     """Every number in `text`: its literal token and its set of possible
     values (with scale words such as "million" applied)."""
+    text = join_split_groups(text)
     figures = []
     for match in _NUMBER.finditer(text):
         values = _interpretations(match.group())
@@ -132,7 +144,7 @@ def match_figure(value_text: str, source_text: str) -> float | None:
     """The value of `value_text` (its primary reading) if that figure appears
     in `source_text`, else None. Used by ID-HU-FE-003's figure extraction so
     a compared value is always one the source actually contains."""
-    match = _NUMBER.search(value_text)
+    match = _NUMBER.search(join_split_groups(value_text))
     if match is None:
         return None
     value = primary_reading(match.group())

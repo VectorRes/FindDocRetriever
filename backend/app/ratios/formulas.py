@@ -138,6 +138,16 @@ _ITEMS = [
 ]
 LINE_ITEMS: dict[str, LineItem] = {item.key: item for item in _ITEMS}
 
+# Totals that start with a line item's name but are a different figure: the
+# balance sheet's grand total is not total liabilities. Never taken as an input.
+COMBINED_TOTALS: tuple[str, ...] = (
+    "Total liabilities and equity", "Total liabilities and stockholders' equity",
+    "Total liabilities and shareholders' equity", "Total liabilities and net assets",
+    "Liabilities and equity", "Liabilities and stockholders' equity", "Liabilities and shareholders' equity",
+    "Total pasivos y patrimonio", "Total pasivo y patrimonio", "Total pasivo y patrimonio neto",
+    "Pasivos y patrimonio", "Pasivo y patrimonio",
+)
+
 # Balances that are never negative in a correctly-read statement. A negative
 # one (negative equity, or a sign/line-item mix-up) makes ratios built on it
 # misleading, e.g. a negative debt-to-equity, so the engine flags them.

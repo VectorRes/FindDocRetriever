@@ -24,10 +24,13 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from app.figures.extraction import UNIT_SCALES, ExtractedFigure, ExtractionServiceError, column_of, distinct_periods, entity_key, extract_figure
+from app.figures.extraction import (
+    UNIT_SCALES, ExtractedFigure, ExtractionServiceError, column_of, distinct_periods, entity_key, extract_figure,
+    same_entity,
+)
 from app.qa.schemas import ResolvedCitation
 from app.ratios.formulas import CATEGORIES, LINE_ITEMS, POSITIVE_ITEMS, RATIOS, LineItem, RatioDefinition
-from app.ratios.mapping import label_matches, statement_hint_score
+from app.ratios.mapping import label_matches, names_other_item, other_labels, statement_hint_score
 
 Confidence = Literal["high", "medium", "low"]
 _RANK = {"high": 2, "medium": 1, "low": 0}
@@ -68,6 +71,9 @@ class MappedInput:
     coverage_mismatch: bool = False
     # Not found because the model service failed, not because it's missing.
     error: bool = False
+    # Not a line in the statement but computed from these inputs (e.g. total
+    # liabilities = total assets - total equity); their citations back it.
+    derived_from: list["MappedInput"] = field(default_factory=list)
 
 
 @dataclass
@@ -119,6 +125,9 @@ class DocumentRef:
         )
 
 
+_CASH_FLOW_TABLE = re.compile(r"cash flows?|flujos? de efectivo|flujos? de caja", re.IGNORECASE)
+
+
 def to_mapped_input(item: LineItem, document, figure: ExtractedFigure) -> MappedInput:
     """Turn one extraction into a formula input, checking the label mapping.
 
@@ -130,6 +139,22 @@ def to_mapped_input(item: LineItem, document, figure: ExtractedFigure) -> Mapped
             key=item.key, name=item.name, statement=item.statement, found=False,
             document_id=str(document.id), document_filename=document.filename,
             reason=f"{document.filename}: {figure.reason or 'not found'}", error=figure.error,
+        )
+    if "%" in (figure.value_text or ""):
+        # Every formula input is an amount; "27 %" is a growth rate or a margin.
+        return MappedInput(
+            key=item.key, name=item.name, statement=item.statement, found=False,
+            document_id=str(document.id), document_filename=document.filename,
+            reason=f"{document.filename}: doesn't report {item.name} as an amount (found a percentage).",
+        )
+    if names_other_item(item, figure.label):
+        # "Operating income" offered as gross profit, or the balance sheet's
+        # grand total as total liabilities: a different line, not this one.
+        return MappedInput(
+            key=item.key, name=item.name, statement=item.statement, found=False,
+            document_id=str(document.id), document_filename=document.filename,
+            reason=f"{document.filename}: doesn't report {item.name} (the closest line, "
+                   f"'{figure.label}', is a different item).",
         )
 
     issues = dict(figure.issues) or ({"other": figure.reason} if figure.reason else {})
@@ -147,6 +172,12 @@ def to_mapped_input(item: LineItem, document, figure: ExtractedFigure) -> Mapped
             f"{figure.period_coverage.replace('_', ' ')}{header}; it may be a cash-flow change, not the balance."
         )
     source_text = figure.citation.text if figure.citation else ""
+    table_title = source_text.split("row '", 1)[0] if "row '" in source_text else ""
+    if item.statement == "balance_sheet" and _CASH_FLOW_TABLE.search(table_title):
+        issues["coverage"] = (
+            f"{item.name} was read from the cash flow statement, where it is the period's change, "
+            "not the balance; check the balance sheet."
+        )
     from_pdf = bool(figure.citation and figure.citation.page_number is not None)
     if (
         item.statement == "income_statement"
@@ -212,7 +243,10 @@ def _find_item(
     misses: list[str] = []
     attempts = errors = 0
     for document in order_documents(documents, item):
-        figure = extractor(db, document.id, item.query, user_roles=user_roles, user_id=user_id, period=period)
+        figure = extractor(
+            db, document.id, item.query, user_roles=user_roles, user_id=user_id, period=period,
+            labels=item.accepted_labels, exclude_labels=other_labels(item),
+        )
         attempts += 1
         errors += figure.error
         candidate = to_mapped_input(item, document, figure)
@@ -280,7 +314,7 @@ def map_line_items(
 
 def _unique_citations(inputs: list[MappedInput]) -> list[ResolvedCitation]:
     seen, citations = set(), []
-    for mapped in inputs:
+    for mapped in [part for i in inputs for part in (i.derived_from or [i])]:
         c = mapped.citation
         if c is None:
             continue
@@ -403,6 +437,10 @@ def _comparable_period(i: MappedInput) -> str | None:
         dates = _END_DATE.findall(i.column_header)
         if dates:
             return dates[-1]
+        # A column headed by its year alone ("2025") is that year: compared
+        # with "December 31, 2023" it is a different period.
+        if re.search(r"(?<!\d)(?:19|20)\d{2}(?!\d)", i.column_header):
+            return i.column_header
     return i.period
 
 
@@ -425,13 +463,61 @@ def flag_odd_coverage(mapped: dict[str, MappedInput]) -> None:
             i.reason = f"{note} {i.reason}" if i.reason else note
 
 
+# Inputs a statement often doesn't print as a line, but that follow from two
+# it does: many US balance sheets have no "Total liabilities" line, and many
+# income statements no "Gross profit". (input, minuend, subtrahend, formula)
+_DERIVATIONS = {
+    "total_liabilities": ("total_assets", "total_equity", "Total assets − Total equity"),
+    # Cost of sales may be printed negative; gross profit subtracts its magnitude.
+    "gross_profit": ("revenue", "cost_of_sales", "Revenue − Cost of sales"),
+}
+
+
+def _format_amount(value: float) -> str:
+    text = f"{value:,.2f}".rstrip("0").rstrip(".")
+    return text
+
+
+def derive(key: str, mapped: dict[str, MappedInput]) -> MappedInput | None:
+    """`key` computed from its two parts, when both were found in the same
+    document, for the same period and span, as standard line items; None
+    otherwise (then the input stays missing)."""
+    minuend_key, subtrahend_key, formula = _DERIVATIONS[key]
+    a, b = mapped.get(minuend_key), mapped.get(subtrahend_key)
+    if a is None or b is None or not (a.found and b.found):
+        return None
+    if a.needs_review or b.needs_review or a.coverage_mismatch or b.coverage_mismatch:
+        return None
+    if a.document_id != b.document_id or a.unit_scale != b.unit_scale:
+        return None
+    if len(distinct_periods([_comparable_period(a), _comparable_period(b)])) > 1:
+        return None
+    if a.period_coverage and b.period_coverage and a.period_coverage != b.period_coverage:
+        return None
+    value = a.value - abs(b.value)
+    scale = UNIT_SCALES.get(a.unit_scale, 1.0)
+    item = LINE_ITEMS[key]
+    return MappedInput(
+        key=key, name=item.name, statement=item.statement, found=True,
+        value=value, value_text=_format_amount(value / scale), unit_scale=a.unit_scale,
+        currency=a.currency or b.currency, period=a.period or b.period, label=f"Derived: {formula}",
+        entity=a.entity or b.entity, period_coverage=a.period_coverage or b.period_coverage,
+        column_header=a.column_header or b.column_header,
+        document_id=a.document_id, document_filename=a.document_filename, citation=a.citation,
+        confidence="medium",
+        reason=(f"{item.name} isn't reported as a line; derived as {formula} = "
+                f"{a.value_text} − {b.value_text.lstrip('(').rstrip(')')}."),
+        derived_from=[a, b],
+    )
+
+
 def _distinct_entities(inputs) -> list[str]:
     """The different companies among the inputs (unknown ones left out)."""
-    seen: dict[str, str] = {}
+    seen: list[str] = []
     for i in inputs:
-        if i.found and i.entity and entity_key(i.entity):
-            seen.setdefault(entity_key(i.entity), i.entity)
-    return list(seen.values())
+        if i.found and i.entity and entity_key(i.entity) and not any(same_entity(i.entity, s) for s in seen):
+            seen.append(i.entity)
+    return seen
 
 
 def _operands(inputs: list[MappedInput]) -> dict[str, float]:
@@ -439,7 +525,10 @@ def _operands(inputs: list[MappedInput]) -> dict[str, float]:
     figures as written: a ratio is unit-free, so the document's scale cancels
     out, and it avoids trusting a scale ("in millions") that extraction applied
     to some of its figures but not to others."""
-    if len({i.document_id for i in inputs}) == 1:
+    scales = {i.unit_scale for i in inputs}
+    # Two explicit, different scales ("79,975" in millions, "$2.3 billion") are
+    # both real: then the scaled values are the comparable ones.
+    if len({i.document_id for i in inputs}) == 1 and (len(scales) == 1 or "units" in scales):
         return {i.key: i.value / UNIT_SCALES.get(i.unit_scale, 1.0) for i in inputs}
     return {i.key: i.value for i in inputs}
 
@@ -478,6 +567,19 @@ def calculate_ratios(
         extractor=extractor, session_factory=session_factory, max_workers=max_workers,
     )
     flag_odd_coverage(mapped)
+    missing = [key for key in _DERIVATIONS if key in mapped and not mapped[key].found and not mapped[key].error]
+    parts = list(dict.fromkeys(
+        part for key in missing for part in _DERIVATIONS[key][:2] if part not in mapped
+    ))
+    if parts:
+        mapped.update(map_line_items(
+            db, documents, parts, period=period, user_roles=user_roles, user_id=user_id,
+            extractor=extractor, session_factory=session_factory, max_workers=max_workers,
+        ))
+    for key in missing:
+        derived = derive(key, mapped)
+        if derived is not None:
+            mapped[key] = derived
     ratios = [compute_ratio(definition, mapped) for definition in definitions]
 
     notes = [

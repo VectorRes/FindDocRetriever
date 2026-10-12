@@ -170,6 +170,15 @@ _PERIOD_GROUP = re.compile(
 )
 # Full dates, e.g. the column headings under period groups.
 _FULL_DATE = re.compile(rf"\b{_DATE}\b")
+# Numeric dates ("31/12/2024", "2024-12-31") and the change columns that
+# often follow them in comparative statements.
+_NUMERIC_DATE = re.compile(r"\d{1,2}[/.-]\d{1,2}[/.-](?:19|20)\d{2}|(?:19|20)\d{2}-\d{2}-\d{2}")
+_NUMERIC_HEADING = re.compile(
+    rf"(?<![\d/.-])(?:{_NUMERIC_DATE.pattern})(?![\d/.-])"
+    r"|\b(?:Variaci[oó]n|Variation|Var\.)(?:\s+(?:absoluta|relativa|porcentual|absolute|relative|%))?"
+    r"|%\s*(?:Change|Var(?:iaci[oó]n)?)|\bChange\b(?:\s+%)?|\bDiferencia\b",
+    re.IGNORECASE,
+)
 HEADING_WINDOW_CHARS = 400
 # The heading of a column of note references ("Nota 5", "Note 12").
 _NOTE_HEADING = re.compile(r"\b(?:notas?|notes?)\b", re.IGNORECASE)
@@ -188,12 +197,104 @@ _YEAR_RUN = re.compile(r"(?:(?<!\d)(?:19|20)\d{2}(?!\d)[\s,]*){2,}")
 
 
 def _clean_value(cell: str | None) -> str:
-    """The figure in a cell, without a currency sign pdfplumber glued to it ("28,196 $")."""
-    return " ".join(_CURRENCY_SIGNS.sub(" ", cell or "").split())
+    """The figure in a cell, without a currency sign pdfplumber glued to it
+    ("28,196 $"). A negative in the last column often loses its closing
+    parenthesis to the table's clip ("(2,274"): it's restored."""
+    value = " ".join(_CURRENCY_SIGNS.sub(" ", cell or "").split())
+    if value.startswith("(") and ")" not in value and re.search(r"\d$", value):
+        value += ")"
+    return value
+
+
+# A figure glued to the end of a row label, after a currency sign: "Net
+# income $ 30,425", "Total activo $166,568,554 $133,375,329 -$6,081,160".
+_TRAILING_FIGURE = re.compile(r"\s+(-?)(?:US\$|\$|€|£|¥)\s*(\(?-?\d[\d.,]*\)?)$")
+
+
+def _attach_minus_signs(row: list[str], value_columns: list[int]) -> list[str]:
+    """A minus sign the table put in its own cell ("- | 36,977") or at the
+    end of the previous figure ("499 - | 209") belongs to the next figure."""
+    row = list(row)
+    for i, cell in enumerate(row):
+        text = (cell or "").strip()
+        dangling = text in {"-", "−"} and i not in value_columns
+        trailing = re.fullmatch(r"(.*\d)\s+[-−]", text)
+        if not (dangling or trailing):
+            continue
+        j = next((k for k in range(i + 1, len(row)) if (row[k] or "").strip()), None)
+        if j is None or j not in value_columns or not re.fullmatch(r"\(?\d[\d.,]*\)?", row[j].strip()):
+            continue
+        row[j] = "-" + row[j].strip()
+        row[i] = trailing.group(1) if trailing else ""
+    return row
+
+
+def _split_label_value(row: list[str], value_columns: list[int]) -> list[str]:
+    """Move figures glued to the end of the row label back into the row's
+    empty value columns, in order: PDF tables put "$" before a row's figures
+    (often only on totals), and the label clip can swallow one or all of
+    them. Only figures after a currency sign are taken, so a number that is
+    part of the label ("Notes due 2026") stays."""
+    if not row or not value_columns:
+        return row
+    label = (row[0] or "").strip()
+    figures: list[str] = []
+    while (match := _TRAILING_FIGURE.search(label)) and re.search(r"[A-Za-zÀ-ÿ]", label[:match.start()]):
+        figures.insert(0, match.group(1) + match.group(2))
+        label = label[:match.start()].rstrip()
+    empty = [c for c in value_columns if c >= len(row) or not _is_value(row[c])]
+    if not figures or len(figures) > len(empty):
+        return row
+    row = list(row) + [""] * max(0, max(value_columns) + 1 - len(row))
+    row[0] = label
+    for column, figure in zip(empty, figures):
+        row[column] = figure
+    return row
+
+
+# Letters printed with tracking come out spaced ("T o tal revenue s").
+_SPACED_LETTERS = re.compile(r"(?<![A-Za-z])[A-Za-z](?: [A-Za-z]{1,3}\b)+|\b[A-Za-z]{2,} [a-z](?![A-Za-z])")
+
+
+def _respace_label(label: str, page_text: str) -> str:
+    """The label as printed on the page when the table split its letters
+    ("T o tal revenue s" -> "Total revenues"): its letters, ignoring spaces,
+    looked up in the page's text. Unchanged when not found exactly once."""
+    if not page_text or not _SPACED_LETTERS.search(label):
+        return label
+    letters = re.sub(r"\s+", "", label)
+    if len(letters) < 4:
+        return label
+    positions = [i for i, ch in enumerate(page_text) if not ch.isspace()]
+    compact = "".join(page_text[i] for i in positions)
+    start = compact.find(letters)
+    if start < 0 or compact.find(letters, start + 1) >= 0:
+        return label
+    original = page_text[positions[start]:positions[start + len(letters) - 1] + 1]
+    return " ".join(original.split())
 
 
 def _is_value(cell: str | None) -> bool:
     return bool(_NUMBER_CELL.match(_clean_value(cell)))
+
+
+def _is_data_row(row: list[str]) -> bool:
+    """Whether a row pdfplumber gave as the table header is really a data row
+    ("Products | 47,153 | 43,620"), not headings or a title split into cells
+    ("COMPARATIVO AL | 31 | DE DICIEMBRE DE 20 | … | 023")."""
+    cells = [(cell or "").strip() for cell in row[1:] if (cell or "").strip()]
+    values = [cell for cell in cells if _is_value(cell) and not _YEAR_CELL.fullmatch(cell)]
+    if any(_is_amount(cell) for cell in values):
+        return True
+    words = [cell for cell in cells if cell not in values and not _CURRENCY_CELL.match(cell)]
+    return len(values) >= 2 and not words
+
+
+def _is_amount(cell: str | None) -> bool:
+    """A figure shaped like an amount (grouped, decimal or 4+ digits), not a
+    fragment of a split title ("31", "023" from "31 DE DICIEMBRE DE 2023")."""
+    value = _clean_value(cell).strip("()-−% ")
+    return _is_value(cell) and bool(re.fullmatch(r"\d{1,3}(?:[.,]\d{3})+(?:[.,]\d+)?|\d+[.,]\d+|\d{4,}", value))
 
 
 def _table_preamble(rows: list[list[str]], page_text: str) -> str:
@@ -232,6 +333,11 @@ def _column_labels(header_row: list[str], value_columns: list[int], preamble: st
     dates = [" ".join(m.group(0).split()) for m in _POINT_IN_TIME.finditer(heading_text)]
     if value_columns and len(dates) == len(value_columns):
         return dict(zip(value_columns, dates))
+    # "31/12/2024  31/12/2023  Variación absoluta  Variación relativa": numeric
+    # dates (common outside the US) and change columns, one per value column.
+    headings = [" ".join(m.group(0).split()) for m in _NUMERIC_HEADING.finditer(heading_text)]
+    if value_columns and len(headings) == len(value_columns) and any(_NUMERIC_DATE.fullmatch(h) for h in headings):
+        return dict(zip(value_columns, headings))
 
     years_runs = [re.findall(r"(?:19|20)\d{2}", m.group(0)) for m in _YEAR_RUN.finditer(heading_text)]
     years = next((run for run in reversed(years_runs) if len(run) == len(value_columns)), None)
@@ -329,12 +435,18 @@ def _without_note_column(
     "Note" heading. They're cross-references, not amounts."""
     if len(value_columns) < 2:
         return value_columns
-    headings = " ".join(cell or "" for cell in header_row) + " " + preamble[-HEADING_WINDOW_CHARS:]
-    if not _NOTE_HEADING.search(headings):
-        return value_columns
     first = value_columns[0]
     cells = [_clean_value(row[first]) for row in rows if first < len(row) and _is_value(row[first])]
-    if cells and all(re.fullmatch(r"\d{1,2}(?:\.\d{1,2})?", cell) for cell in cells):
+    headings = " ".join(cell or "" for cell in header_row) + " " + preamble[-HEADING_WINDOW_CHARS:]
+    if _NOTE_HEADING.search(headings):
+        if cells and all(re.fullmatch(r"\d{1,2}(?:\.\d{1,2})?", cell) for cell in cells):
+            return value_columns[1:]
+        return value_columns
+    # Without a heading: numbered note references read like section numbers
+    # ("6.1", "6.2" … "6.10"), always increasing, never like amounts.
+    sections = [tuple(int(part) for part in cell.split(".")) for cell in cells
+                if re.fullmatch(r"\d{1,2}\.\d{1,2}", cell)]
+    if len(cells) >= 3 and len(sections) == len(cells) and sections == sorted(sections):
         return value_columns[1:]
     return value_columns
 
@@ -343,9 +455,7 @@ def _table_row_chunks(table: ParsedPdfTable, page_text: str = "") -> list[Chunk]
     printed = " ".join(page_text.split())
     rows = [_merge_split_numbers(row, printed) for row in table.rows]
     header_row = table.headers
-    if header_row and header_row[0] and any(
-        _is_value(cell) and not _YEAR_CELL.fullmatch((cell or "").strip()) for cell in header_row[1:]
-    ):
+    if header_row and header_row[0] and _is_data_row(header_row):
         # pdfplumber took a data row ("Products | 47,153 | 43,620") as the header.
         rows = [_merge_split_numbers(header_row, printed), *rows]
         header_row = []
@@ -376,10 +486,11 @@ def _table_row_chunks(table: ParsedPdfTable, page_text: str = "") -> list[Chunk]
     section = opening.group(1).strip() if opening else None
     chunks: list[Chunk] = []
     for row in rows:
+        row = _split_label_value(_attach_minus_signs(row, value_columns), value_columns)
         # Text in other columns is the rest of a wrapped label, not a value.
         words = [cell.strip() for i, cell in enumerate(row) if cell and cell.strip()
                  and i not in value_columns and not _CURRENCY_CELL.match(cell)]
-        label = " ".join(words) or "(unlabelled row)"
+        label = _respace_label(" ".join(words), printed) or "(unlabelled row)"
         values = [
             f"{labels.get(column) or f'column {position}'}={_clean_value(row[column])}"
             for position, column in enumerate(value_columns, start=1)

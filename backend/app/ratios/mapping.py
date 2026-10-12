@@ -40,8 +40,18 @@ def _words(text: str) -> list[str]:
     return re.findall(r"[a-z]+", text)            # drops digits: years, note numbers
 
 
+def _singular(word: str) -> str:
+    """Plural and singular compare equal ("equivalentes" / "equivalente",
+    "inventories" / "inventory", "revenues" / "revenue")."""
+    if len(word) > 4 and word.endswith("ies"):
+        return word[:-3] + "y"
+    if len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
+        return word[:-1]
+    return word
+
+
 def normalize_label(label: str) -> str:
-    words = [word for word in _words(label) if word not in _FILLER]
+    words = [_singular(word) for word in _words(label) if word not in _FILLER]
     # US GAAP's ", net" suffix ("Accounts receivable, net") names the same line item.
     if len(words) > 1 and words[-1] == "net":
         words = words[:-1]
@@ -56,6 +66,27 @@ def label_matches(item: LineItem, label: str | None) -> bool:
     # line item is the part after it.
     candidates = {normalize_label(label), normalize_label(label.rsplit(":", 1)[-1])}
     return any(candidate and candidate in accepted for candidate in candidates)
+
+
+def other_labels(item: LineItem) -> tuple[str, ...]:
+    """Labels that name something other than `item`: the other line items'
+    accepted names and the combined totals ("Total liabilities and equity")."""
+    from app.ratios.formulas import COMBINED_TOTALS, LINE_ITEMS
+
+    own = {normalize_label(name) for name in item.accepted_labels}
+    names = [name for other in LINE_ITEMS.values() if other.key != item.key for name in other.accepted_labels]
+    return tuple(name for name in (*names, *COMBINED_TOTALS) if normalize_label(name) not in own)
+
+
+def names_other_item(item: LineItem, label: str | None) -> bool:
+    """True when `label` is another line item's name or a combined total:
+    then it isn't `item` at all ("Operating income" for gross profit), as
+    opposed to a non-standard name for it that the analyst should review."""
+    if not label or label_matches(item, label):
+        return False
+    others = {normalize_label(name) for name in other_labels(item)}
+    candidates = {normalize_label(label), normalize_label(label.rsplit(":", 1)[-1])}
+    return bool(candidates & others)
 
 
 def statement_hint_score(statement: Statement, names: list[str]) -> int:
