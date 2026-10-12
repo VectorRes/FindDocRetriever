@@ -501,3 +501,29 @@ def test_distinct_periods_groups_names_of_one_period_and_skips_unknown():
 
     assert distinct_periods(["As of June 30, 2026", None, "Q2 2026", "June 30, 2026"]) == ["As of June 30, 2026"]
     assert distinct_periods(["2024", "FY2025"]) == ["2024", "FY2025"]
+
+
+@pytest.mark.parametrize(
+    ("value_text", "source", "column", "coverage"),
+    [("364,357", "row 'Total net sales': Three Months Ended June 27, 2026=109,417; Nine Months Ended June 27, 2026=364,357",
+      "Nine Months Ended June 27, 2026", "nine_months"),
+     ("109,417", "row 'Total net sales': Three Months Ended June 27, 2026=109,417; Nine Months Ended June 27, 2026=364,357",
+      "Three Months Ended June 27, 2026", "three_months"),
+     ("39,544", "row 'Cash': June 27, 2026=39,544; September 27, 2025=35,934", "June 27, 2026", "point_in_time"),
+     ("343,524", "row 'Total current assets': As of June 30, 2026=343,524", "As of June 30, 2026", "point_in_time"),
+     ("610000", "Sheet 'EERR', Utilidad neta: Concepto=Utilidad neta; 2024=610000", "2024", None),
+     ("100", "row 'X': column 1=100; column 2=100", None, None),
+     ("166,835", "row 'Cost of sales': column 7=54,647; column 8=166,835", None, None)],
+)
+def test_column_and_coverage_come_from_the_source_row(value_text, source, column, coverage):
+    from app.figures.extraction import column_of, coverage_of
+
+    assert column_of(value_text, source) == (column if column != "column 1" else None)
+    assert coverage_of(column_of(value_text, source)) == coverage
+
+
+def test_source_row_label():
+    from app.figures.extraction import source_row_label
+
+    assert source_row_label("Financial table page 4 (…), row 'Cost of sales: Products': Three Months=47,153") == "Cost of sales: Products"
+    assert source_row_label("Sheet 'EERR', Utilidad neta: Concepto=Utilidad neta") is None

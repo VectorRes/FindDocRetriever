@@ -17,10 +17,11 @@ from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models import Document, DocumentStatus
-from app.qa.confidence import match_figure
+from app.qa.confidence import match_figure, primary_reading
 from app.qa.llm import get_chat_model
 from app.qa.prompts import describe_location, label_chunks
 from app.qa.schemas import ResolvedCitation
@@ -122,10 +123,13 @@ from a single document.
 - Find the source that states the METRIC's value. Use only the SOURCES; \
 never compute, estimate or convert a figure yourself.
 - Copy the number exactly as it is written in that source into value_text \
-and give that source's id.
+and give that source's id. Prefer a table row whose values are labelled \
+with their column ("Three Months Ended June 30 2026=119,796") over page text \
+where the numbers have no labels.
 - If the document gives the metric for several periods: use PERIOD when it \
-is given; otherwise use the most recent one and list the others in \
-other_periods.
+is given; otherwise use the most recent one (when there are both \
+quarterly and year-to-date columns, the most recent quarter) and list the \
+others in other_periods.
 - Prefer the consolidated total for the whole entity over segment, \
 geographic or product breakdowns of the same line item.
 - Statements often have both quarterly and year-to-date columns (e.g. \
@@ -226,7 +230,8 @@ def period_aliases(period: str | None) -> set[str]:
     if match:
         month, day, year = match.group(1), int(match.group(2)), match.group(3)
     else:
-        match = re.search(r"\b(\d{1,2}) de ([a-z]{3})[a-z]* de (\d{4})\b", key)  # 30 de junio de 2026
+        # 30 de junio de 2026 / 31 December 2025
+        match = re.search(r"\b(\d{1,2}) (?:de )?([a-z]{3})[a-z]* (?:del? )?(\d{4})\b", key)
         month, day, year = (match.group(2), int(match.group(1)), match.group(3)) if match else (None, 0, "")
     quarter = _QUARTER_ENDS.get((_MONTHS.get(month or ""), day))
     if quarter:
@@ -248,6 +253,65 @@ def distinct_periods(periods: list[str | None]) -> list[str]:
         if period and not any(same_period(period, seen) for seen in distinct):
             distinct.append(period)
     return distinct
+
+
+_NUMBER_TOKEN = re.compile(r"\d[\d.,]*\d|\d")
+_LABELLED_VALUE = re.compile(r"(?:^|;\s*|:\s+)([^;=:]+?)=([^;]+)")
+
+
+def column_of(value_text: str | None, source_text: str) -> str | None:
+    """The column label a value sits under in a labelled source row
+    ("... row 'Revenues': Quarter Ended June 30 2026=119,796; ..." ->
+    "Quarter Ended June 30 2026"), or None when the row doesn't label it
+    or several columns hold that same value."""
+    if not value_text:
+        return None
+    number = _NUMBER_TOKEN.search(value_text)
+    if number is None:
+        return None
+    target = primary_reading(number.group())
+    labels = []
+    for match in _LABELLED_VALUE.finditer(source_text):
+        label, raw = match.group(1).strip(), match.group(2)
+        found = _NUMBER_TOKEN.search(raw)
+        # "column 8" is a position, not a heading: the row doesn't say which period it is.
+        if found and label and not re.fullmatch(r"column \d+", label) and abs(primary_reading(found.group()) - target) < 1e-9:
+            labels.append(label)
+    distinct = list(dict.fromkeys(labels))
+    return distinct[0] if len(distinct) == 1 else None
+
+
+_ROW_LABEL = re.compile(r"\brow '([^']+)':")
+
+
+def source_row_label(source_text: str) -> str | None:
+    """The label of a PDF table row ("... row 'Cost of sales: Products': ...")."""
+    match = _ROW_LABEL.search(source_text)
+    return match.group(1).strip() if match and match.group(1) != "(unlabelled row)" else None
+
+
+def coverage_of(label: str | None) -> str | None:
+    """The span a column label covers, when it says so."""
+    if not label:
+        return None
+    text = label.lower()
+    if re.search(r"three months|quarters? ended|\bq[1-4]\b|trimestre|tres meses", text):
+        return "three_months"
+    if re.search(r"six months|semestre|seis meses|\bh[12]\b", text):
+        return "six_months"
+    if re.search(r"nine months|nueve meses", text):
+        return "nine_months"
+    if re.search(r"twelve months|years? ended|fiscal year|full year|\bannual\b|doce meses|a[ñn]os? terminados?|\banual\b", text):
+        return "twelve_months"
+    stripped = text.strip()
+    if (
+        re.search(r"\bas (?:of|at)\b|^al?\s+\d", text)
+        or re.fullmatch(r"[a-z]+\.?\s+\d{1,2},\s*\d{4}", stripped)          # june 27, 2026
+        or re.fullmatch(r"\d{1,2}\s+[a-z]+\.?\s+\d{4}", stripped)           # 31 december 2025
+        or re.fullmatch(r"\d{1,2}\s+de\s+[a-záéíóú]+\s+del?\s+\d{4}", stripped)  # 31 de diciembre de 2025
+    ):
+        return "point_in_time"  # a balance date, not a span
+    return None
 
 
 def expected_coverage(period: str | None) -> set[str] | None:
@@ -334,6 +398,80 @@ def _verified(
     return value, _citation(source_id, chunk)
 
 
+MAX_ROW_LOOKUP = 5
+
+
+def _labelled_rows_with(
+    db: Session, document: Document, value_text: str | None, user_roles: str | None, user_id: str | None,
+    question: str,
+) -> dict[str, RetrievedChunk]:
+    """PDF table rows of `document` that contain `value_text`, as extra
+    sources ("R1", "R2"…), access-checked and audited like retrieval."""
+    from app.db.models import Chunk, RetrievalAuditLog
+
+    if not value_text or not value_text.strip():
+        return {}
+    number = _NUMBER_TOKEN.search(value_text)
+    if number is None:
+        return {}
+    roles = parse_roles(user_roles)
+    found = db.scalars(
+        select(Chunk).where(
+            Chunk.document_id == document.id,
+            Chunk.content_type == "table_row",
+            Chunk.text.contains(number.group()),
+        ).limit(MAX_ROW_LOOKUP * 4)
+    ).all()
+    rows: dict[str, RetrievedChunk] = {}
+    for chunk in found:
+        if len(rows) >= MAX_ROW_LOOKUP or not can_access(chunk.confidentiality_tag, roles):
+            continue
+        rows[f"R{len(rows) + 1}"] = RetrievedChunk(
+            chunk_id=str(chunk.id), document_id=str(chunk.document_id), document_filename=document.filename,
+            sheet_name=chunk.sheet_name, cell_range=chunk.cell_range, page_number=chunk.page_number,
+            text=chunk.text, content_type=chunk.content_type, extraction_method=chunk.extraction_method,
+            confidence=chunk.confidence, confidence_label=chunk.confidence_label,
+            confidentiality_tag=chunk.confidentiality_tag,
+        )
+        db.add(RetrievalAuditLog(
+            user_id=user_id or "anonymous", roles=sorted(roles), action="retrieve",
+            document_id=chunk.document_id, chunk_id=chunk.id,
+            confidentiality_tag=chunk.confidentiality_tag, authorized=True, question=question,
+        ))
+    if rows:
+        db.flush()
+    return rows
+
+
+def labelled_source(
+    source_map: dict[str, RetrievedChunk], source_id: str | None, value_text: str | None, label: str | None
+) -> tuple[str, RetrievedChunk] | None:
+    """A table row holding the same figure under a column label, when the
+    model cited page text without labels: citing the row lets the period
+    column be confirmed instead of guessed. When several rows hold the
+    figure, the one whose row label contains the model's label is used;
+    ambiguous otherwise, so None."""
+    chosen = source_map.get(source_id or "")
+    if chosen is None or not value_text or column_of(value_text, chosen.text):
+        return None
+    candidates = [
+        (sid, chunk) for sid, chunk in source_map.items()
+        if sid != source_id and column_of(value_text, chunk.text)
+    ]
+    if len(candidates) > 1 and label:
+        wanted = " ".join(re.findall(r"[a-z]+", label.lower()))
+        matching = [
+            (sid, chunk) for sid, chunk in candidates
+            if wanted and wanted in " ".join(re.findall(r"[a-z]+", (source_row_label(chunk.text) or "").lower()))
+        ]
+        candidates = matching or candidates
+    # Several rows are fine when they all put the figure under the same column
+    # (net income repeated in the income, comprehensive income and equity statements).
+    if candidates and len({column_of(value_text, chunk.text) for _, chunk in candidates}) == 1:
+        return candidates[0]
+    return None
+
+
 def extract_figure(
     db: Session,
     document_id: UUID | str,
@@ -387,6 +525,14 @@ def extract_figure(
         return result
 
     value, citation = verified
+    labelled = labelled_source(source_map, figure.source_id, figure.value_text, figure.label)
+    if labelled is None and not column_of(figure.value_text, source_map[figure.source_id].text):
+        # Retrieval's top-k may have left the labelled row out: look it up in the document.
+        rows = _labelled_rows_with(db, document, figure.value_text, user_roles, user_id, query)
+        labelled = labelled_source({figure.source_id: source_map[figure.source_id], **rows},
+                                   figure.source_id, figure.value_text, figure.label)
+    if labelled is not None:
+        citation = _citation(*labelled)
     issues: dict[str, str] = {}
     unit_scale = figure.unit_scale
     if not _documented_scale(unit_scale, source_map):
@@ -401,11 +547,18 @@ def extract_figure(
         issues["periods"] = (
             f"The document also has {', '.join(figure.other_periods)}; the most recent period was used."
         )
+    # The column as the source row labels it ("Nine Months Ended June 27,
+    # 2026=364,357") beats the model's reading, which often leaves it out.
+    source_column = column_of(figure.value_text, citation.text)
+    column_header = source_column or figure.column_header
+    coverage = coverage_of(source_column) or (
+        None if figure.period_coverage == "unknown" else figure.period_coverage
+    )
     expected = expected_coverage(period)
-    if expected and figure.period_coverage not in expected | {"unknown"}:
-        header = f" ({figure.column_header})" if figure.column_header else ""
+    if expected and coverage and coverage not in expected:
+        header = f" ({column_header})" if column_header else ""
         issues["coverage"] = (
-            f"The value covers {_COVERAGE_WORDS[figure.period_coverage]}{header}, "
+            f"The value covers {_COVERAGE_WORDS[coverage]}{header}, "
             f"which doesn't match the period requested ({period})."
         )
 
@@ -417,13 +570,15 @@ def extract_figure(
         unit_scale=unit_scale,
         currency=(figure.currency or "").upper() or single_currency(citation.text),
         period=figure.period or single_year(citation.text, figure.value_text),
-        label=figure.label,
+        # The row's own label when the source is a table row: the model may name
+        # "Cost of sales: Products" as plain "Cost of sales".
+        label=(source_row_label(citation.text) if source_column else None) or figure.label,
         entity=figure.entity,
         citation=citation,
         confidence="medium" if issues else "high",
         reason=" ".join(issues.values()) or None,
-        period_coverage=None if figure.period_coverage == "unknown" else figure.period_coverage,
-        column_header=figure.column_header,
+        period_coverage=coverage,
+        column_header=column_header,
         issues=issues,
     )
 
