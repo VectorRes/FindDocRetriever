@@ -125,6 +125,32 @@ Resultado con el LLM real y `period: "Q2 2026"`: los **13 ratios calculables son
 
 Pendiente, de BE-007: la búsqueda en español sobre un documento en inglés ("efectivo" contra "Cash") puede no encontrar la fila. Ahora responde "sin respuesta confiable" en vez de una cifra equivocada.
 
+## Generalización a cualquier documento (no solo Apple y Google)
+
+Las correcciones anteriores se habían validado con dos PDF en inglés de EE. UU. Para que la lectura no dependa de un emisor, se creó un **corpus de estados financieros PDF generados** (`tests/statement_pdfs.py`, verificado en `tests/test_statement_pdfs.py` con el parser real), que destapó varios supuestos:
+
+| Formato del corpus | Problema encontrado | Corrección |
+|---|---|---|
+| Balance en español (NIIF) con columna **"Nota"** y "Al 31 de diciembre de 2025" | Fechas en español no reconocidas; la columna de notas (5, 6, 12) se leía como valor | Fechas y grupos en español ("31 de diciembre de 2025", "Tres/Seis meses terminados el…", "Acumulado"). La columna de referencias bajo "Nota/Note" se excluye. Los encabezados se toman de los últimos ~400 caracteres antes de la tabla, porque el título también menciona fechas |
+| Estado de resultados en español con trimestre y semestre apilados | Los 4 valores salían como "2026 / 2025" sin distinguir trimestre de semestre | `Tres meses terminados el 30 de junio 2026=5.040; … Seis meses terminados … 2026=9.660`, con cobertura detectada |
+| Inglés, de la columna más vieja a la más nueva; una sola columna | El título "(in USD thousands)" se colaba en la sección | La sección solo toma letras, sin paréntesis |
+| Año fiscal distinto al calendario | — | "Years Ended September 27, 2025" |
+| Notas al pie y referencias ("Revenue (1)  4  58,240") | **Bug:** la referencia "4" se pegaba a la cifra → **458,240** | Dos fragmentos se unen solo si el número unido aparece así en el texto de la página (Alphabet sí imprime "54,190") |
+| PDF escaneado (solo imagen, OCR) | — | El OCR no produce tablas, así que no hay cifras con rótulos falsos. Esas cifras salen retenidas o "no encontradas" |
+
+**Menos retenciones innecesarias:** cuando el modelo cita texto de página sin rótulos, la extracción busca la misma cifra en una fila de tabla rotulada, entre las fuentes o en el mismo documento con permisos y auditoría, y cita esa fila. Así se confirma el periodo y el ratio no queda retenido sin motivo. Con el 10-Q de Apple y `period: "Q3 2026"`, 12 de 13 ratios salen correctos y "calculated"; el incorrecto (inventory turnover) sigue retenido. Con los estados en español, todos salen correctos y "calculated".
+
+**Búsqueda bilingüe y diversa** (`app/qa/query_expansion.py`, sin tocar `retrieve()` de BE-007):
+- Cada pregunta también se busca en el otro idioma (inglés ↔ español) y los resultados se intercalan. "¿Cuál era el efectivo de Apple al 27 de junio de 2026?" ahora responde 39,544; antes no encontraba "Cash".
+- Sin documento elegido, un documento no ocupa más del 60 % de las fuentes si otros tienen fuentes relevantes. "What was revenue?" pasó de traer solo un documento a traer cuatro.
+- Se desactiva con `QUERY_TRANSLATION=false`, como hacen los tests.
+
+**Triage verificado contra las fuentes:** la empresa que asigna el modelo a cada fuente se comprueba contra el texto y el nombre del archivo. Si no coincide, se usa la que da el archivo ("EERR_Andina_2024" → Andina). Las fuentes que mencionan la cifra pedida y el modelo omitió se agregan. "What was revenue?" ahora pregunta por **empresa y periodo** (Andina 2024, Andina 2025, Alphabet).
+
+**Limitaciones que siguen:**
+- **PDF escaneados:** no se reconstruyen tablas; las cifras de esas páginas no se pueden atar a su columna.
+- **Fiabilidad del modelo:** se agregaron controles deterministas, pero el modelo aún varía entre corridas. La garantía es que una cifra no confirmada se retiene, no que siempre se confirme.
+
 ## Cambios de API
 
 | Endpoint | Cambio |
@@ -132,7 +158,7 @@ Pendiente, de BE-007: la búsqueda en español sobre un documento en inglés ("e
 | `GET /ratios/definitions` | Nuevo. La librería de fórmulas. |
 | `POST /ratios` | Nuevo. `{document_ids (1–6), period?, ratios?, categories?}`; respeta `X-User-Role`/`X-User-Id`. Devuelve `ratios[]`, `line_items[]` y `notes[]`. Un ratio o una categoría desconocidos devuelven 400; si el LLM no responde, 503. |
 | `POST /compare` (FE-003) | 503 si el LLM no responde. Las filas traen `period_coverage` y `column_header`. |
-| Configuración | Nuevo setting `RATIO_EXTRACTION_WORKERS` (6). |
+| Configuración | Nuevos settings `RATIO_EXTRACTION_WORKERS` (6) y `QUERY_TRANSLATION` (true). |
 
 ## Frontend
 
@@ -146,7 +172,7 @@ Pendiente, de BE-007: la búsqueda en español sobre un documento en inglés ("e
   - La mayoría corre sin base ni LLM, con un extractor falso.
   - Los de punta a punta usan ingesta real y LLM guionado. El de ROA ejercita la extracción en paralelo contra Postgres; otro simula la caída del LLM y verifica el 503.
   - Además, `tests/test_formula_context.py` (16), `tests/test_conflicts.py` (13) y nuevos casos en `test_confidence_ambiguity.py` cubren las correcciones del chat.
-  - La suite completa da **317 pasan, 0 fallan**, estable en corridas repetidas.
+  - La suite completa da **362 pasan, 0 fallan**, estable en corridas repetidas.
   - Antes fallaban 3 tests (`test_confidentiality`, `test_retrieval`, `test_conversation`); ya fallaban en la rama base, verificado con el código de `feature/fe-003-comparison`. La causa: corrían contra la base de desarrollo, cuyos documentos desplazaban los datos del test en el top-k, como avisa el handoff.
   - Se corrigió en `tests/conftest.py`: los tests usan su propia base (`findoc_rag_test`, o `TEST_DATABASE_URL`), que se crea, se migra y se vacía al iniciar cada corrida. La base de desarrollo ya no se toca.
 - **Frontend:** 11 nuevos en `RatiosView.test.tsx` y 2 en `client.test.ts`. Pasan los 60 de la suite y el typecheck.

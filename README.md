@@ -199,6 +199,22 @@ Endpoints:
 Los documentos existentes antes de la migración `0012_version_control` quedan
 como `approved` (ya se estaban usando para responder).
 
+### Lectura de tablas PDF y búsqueda del chat
+
+- **Tablas PDF** (`app/ingestion/chunker.py`): cada valor queda rotulado con su
+  columna (periodo), en inglés o español. Para eso se usan las fechas "As of
+  …" / "Al 31 de diciembre de …", las corridas de años y los grupos
+  ("Three Months Ended", "Tres meses terminados el …", "Year To Date",
+  "Acumulado"). También:
+  - se excluye la columna de notas ("Nota/Note");
+  - se unen números partidos solo si el número unido aparece en la página;
+  - cada fila lleva su sección.
+  El corpus de formatos está en `tests/statement_pdfs.py`; para cubrir un
+  formato nuevo, se agrega ahí.
+- **Búsqueda del chat** (`app/qa/query_expansion.py`): cada pregunta se busca
+  también en el otro idioma (`QUERY_TRANSLATION`, por defecto `true`). Sin
+  documento elegido, ningún documento ocupa más del 60 % de las fuentes.
+
 ### Explicación de fórmulas y conflictos en el chat
 
 - **Fórmulas:** si una fuente de Excel tiene fórmula, las filas que referencia
