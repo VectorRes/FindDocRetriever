@@ -12,7 +12,8 @@ from app.qa.conversation import (
 from app.qa.formula_context import add_formula_precedents, explain_formulas
 from app.qa.graph import get_qa_graph
 from app.qa.schemas import GroundedAnswer, GroundedStatement, VersionUsed
-from app.retrieval.service import retrieve, restricted_match_exists
+from app.qa.query_expansion import retrieve_for_question
+from app.retrieval.service import restricted_match_exists
 from app.versioning import current_version_of
 
 
@@ -41,7 +42,8 @@ def answer_question(
     asked = question
     question = resolve_clarification_reply(question, history)
 
-    chunks = retrieve(
+    # Bilingual and spread across documents (see app/qa/query_expansion.py).
+    chunks = retrieve_for_question(
         db, question=question, top_k=top_k, user_roles=user_roles, user_id=user_id,
         document_id=document_id,
     )

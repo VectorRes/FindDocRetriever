@@ -85,7 +85,10 @@ Do not answer the question. Report only these facts:
    after the sheet name (e.g. "(Pacífico S.A. — Estado de resultados — Año \
    2024 ...)"), in a column header ("2025=5310000") or in the file name. \
    Different documents frequently cover different companies or years: \
-   check each source, don't assume they match the first one.
+   check each source, don't assume they match the first one. A source that \
+   gives the figure without saying the period still counts: record its \
+   entity (the file name will do, e.g. "2026q2-alphabet-earnings-release" \
+   is Alphabet) and leave the period empty.
 2. entities_with_metric: every distinct company/subsidiary/entity for \
    which the SOURCES give that figure (use the names in the sources or \
    their file names).

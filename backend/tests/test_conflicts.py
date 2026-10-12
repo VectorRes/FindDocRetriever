@@ -193,3 +193,51 @@ def test_quarters_of_one_year_are_different_periods():
     detect_conflicts([q1, q2], _facts(("S2", "Alphabet", "2026"), ("S3", "Alphabet", "2026")), {})
 
     assert not q1.conflicting and not q2.conflicting
+
+
+# --- triage checked against the sources -------------------------------------------------
+
+from app.qa.graph import clarification_for, entity_from_filename, reconcile_triage  # noqa: E402
+from app.retrieval.service import RetrievedChunk  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    ("filename", "entity"),
+    [("EERR_Andina_2024.xlsx", "Andina"), ("2026q2-alphabet-earnings-release (1).pdf", "Alphabet"),
+     ("EEFF_Pacifico_2024.xlsx", "Pacifico"), ("Reporte_BI_Andina_2024.xlsx", "Andina"),
+     ("10Q-Q3-2026-as-filed.pdf", None)],
+)
+def test_entity_from_filename(filename, entity):
+    assert entity_from_filename(filename) == entity
+
+
+def _source(filename, text):
+    return RetrievedChunk(document_id=filename, document_filename=filename, sheet_name=None, cell_range=None,
+                          page_number=1, text=text)
+
+
+def test_triage_entities_are_checked_and_missed_sources_added():
+    sources = {
+        "S1": _source("10Q-Q3-2026-as-filed.pdf", "Note 2 - Revenue: total net sales 109,417"),
+        "S3": _source("2026q2-alphabet-earnings-release.pdf", "row 'Total revenues': column 1=96,428; column 2=119,796"),
+        "S6": _source("EERR_Andina_2024.xlsx", "Andina S.A.S. Ingresos operacionales: 2024=4820000"),
+    }
+    triage = LLMTriage(metric_in_sources=True, requested_metric="revenue", metric_sources=[
+        LLMMetricSource(source_id="S1", entity="Andina S.A.S.", period=None),   # wrong company
+        LLMMetricSource(source_id="S6", entity="Andina S.A.S.", period="2024"),
+    ])
+
+    checked = reconcile_triage(triage, sources)
+
+    by_source = {m.source_id: m.entity for m in checked.metric_sources}
+    assert by_source == {"S1": None, "S6": "Andina S.A.S.", "S3": "Alphabet"}
+    question, options = clarification_for(checked)
+    assert question == "Which entity do you mean?"  # Andina has a single period here
+    assert options == ["Andina S.A.S.", "Alphabet"]
+
+    # With two Andina periods, a company whose sources don't say the period is offered by name.
+    two_periods = checked.model_copy(update={"metric_sources": [
+        *checked.metric_sources, LLMMetricSource(source_id="S6", entity="Andina", period="2025")]})
+    question, options = clarification_for(two_periods)
+    assert question == "Which entity and period do you mean?"
+    assert options == ["Andina S.A.S. – 2024", "Andina S.A.S. – 2025", "Alphabet"]

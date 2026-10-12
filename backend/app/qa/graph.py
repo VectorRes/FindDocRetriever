@@ -42,6 +42,7 @@ from app.qa.schemas import (
     GroundedAnswer,
     GroundedStatement,
     LLMGroundedAnswer,
+    LLMMetricSource,
     LLMTriage,
     ResolvedCitation,
 )
@@ -86,7 +87,62 @@ def triage_node(state: QAState) -> QAState:
         # Neutral when the pre-check failed: no clarification, no penalty for
         # "the figure isn't in the sources" (which triage didn't get to say).
         triage = LLMTriage(metric_in_sources=True)
+    else:
+        triage = reconcile_triage(triage, source_map)
     return {"source_map": source_map, "triage_result": triage}
+
+
+# Words in a file name that say what kind of document it is, not whose.
+_GENERIC_FILE_WORDS = {
+    "eerr", "eeff", "esf", "balance", "general", "estado", "estados", "resultados", "resumen", "reporte",
+    "report", "presupuesto", "nomina", "informe", "financial", "statement", "statements", "consolidated",
+    "earnings", "release", "results", "annual", "quarterly", "filed", "form", "notes", "notas", "the", "and",
+    "del", "las", "los", "usd", "cop", "eur", "draft", "final", "version", "copy", "copia",
+}
+
+
+def entity_from_filename(filename: str) -> str | None:
+    """The company a file name names, if it does ("EERR_Andina_2024.xlsx" ->
+    "Andina", "2026q2-alphabet-earnings-release.pdf" -> "Alphabet",
+    "10Q-Q3-2026-as-filed.pdf" -> None)."""
+    stem = filename.rsplit(".", 1)[0].lower()
+    words = [w for w in re.findall(r"[a-záéíóúñ]+", stem) if len(w) > 2 and w not in _GENERIC_FILE_WORDS]
+    return words[0].title() if words else None
+
+
+def reconcile_triage(triage: LLMTriage, source_map: dict) -> LLMTriage:
+    """Check triage's per-source facts against the sources themselves.
+
+    - An entity the source neither mentions nor is named after (the model
+      put Apple's 10-Q under "Andina") is replaced by the one its file name
+      gives, or left unknown.
+    - Sources that state the requested figure but the model left out (three
+      "Total revenues" rows of another company) are added, with the entity
+      their file name gives — so a question about "revenue" across several
+      companies still asks which one."""
+    sources = []
+    for item in triage.metric_sources:
+        chunk = source_map.get(item.source_id)
+        if chunk is None:
+            continue
+        where = f"{chunk.text} {chunk.document_filename}".lower()
+        key = _entity_key(item.entity or "")
+        stated = bool(key) and key.split()[0] in where
+        entity = item.entity if stated else entity_from_filename(chunk.document_filename)
+        sources.append(item.model_copy(update={"entity": entity}))
+
+    listed = {item.source_id for item in sources}
+    words = [w for w in re.findall(r"[a-záéíóúñ]+", (triage.requested_metric or "").lower()) if len(w) > 3]
+    if words:
+        stem = words[0][:5]  # "revenue" also finds "revenues"
+        for source_id, chunk in source_map.items():
+            if source_id not in listed and stem in chunk.text.lower() and re.search(r"\d[\d.,]{2,}", chunk.text):
+                sources.append(LLMMetricSource(
+                    source_id=source_id, entity=entity_from_filename(chunk.document_filename), period=None,
+                ))
+    if not sources:
+        return triage
+    return triage.model_copy(update={"metric_sources": sources})
 
 
 MAX_CLARIFICATION_OPTIONS = 6
@@ -133,7 +189,13 @@ def clarification_for(triage: LLMTriage) -> tuple[str, list[str]] | None:
             f"{canonical.get(_entity_key(m.entity), m.entity)} – {m.period}"
             for m in by_source if m.entity and m.period
         ])
-        options = observed or [f"{entity} – {period}" for entity in entities for period in periods]
+        # A company whose sources don't say the period is offered by name alone.
+        dated = {_entity_key(m.entity) for m in by_source if m.entity and m.period}
+        undated = _distinct([
+            canonical.get(_entity_key(m.entity), m.entity)
+            for m in by_source if m.entity and _entity_key(m.entity) not in dated
+        ], key=_entity_key)
+        options = (observed + undated) or [f"{entity} – {period}" for entity in entities for period in periods]
     elif missing_entity:
         question = "Which entity do you mean?"
         options = entities

@@ -99,6 +99,10 @@ class LLMTriage(BaseModel):
     the question; whether the question is ambiguous is then decided in code
     (`clarification_for`), not by the model."""
 
+    requested_metric: str | None = Field(
+        default=None,
+        description="The figure or fact the QUESTION asks for, in a few words as the SOURCES name it (e.g. 'revenue').",
+    )
     metric_in_sources: bool = Field(
         default=False,
         description="True if the SOURCES contain the figure or fact the QUESTION asks for.",
@@ -109,7 +113,8 @@ class LLMTriage(BaseModel):
         default_factory=list,
         description=(
             "Go through the SOURCES one by one and add an entry for EVERY source that gives "
-            "the requested figure, with its entity and period. Leave out sources that don't."
+            "the requested figure, with its entity (from the source or its file name) and period "
+            "(empty if the source doesn't say). Leave out sources that don't give the figure."
         ),
     )
     entities_with_metric: list[str] = Field(
