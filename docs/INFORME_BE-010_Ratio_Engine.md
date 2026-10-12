@@ -105,6 +105,26 @@ Probar el chat con `samples/` (Andina 2024/2025, Pacífico, presupuesto con fór
 | El modelo a veces dejaba restos como "(S2).},{" en el texto | `clean_statement_text` los quita; las citas se muestran aparte. |
 | Las cifras salían sin separador ("610000") | El prompt pide formato con separador de miles ("610,000"). La verificación acepta ambas formas. |
 
+## Correcciones con un PDF real (comunicado de resultados de Alphabet, Q2 2026)
+
+Calcular ratios y hacer preguntas sobre el comunicado de Alphabet destapó problemas en la **lectura de tablas PDF**. Varios ratios salían "calculados" con la columna equivocada: el current ratio daba 2.01x en vez de 2.72x, y el operating margin 42.3 % en vez de 34.0 %.
+
+| Problema | Corrección (`app/ingestion/chunker.py`, salvo indicación) |
+|---|---|
+| pdfplumber perdía los encabezados ("Ass", "sets") y cada fila llegaba como `=206,038; =343,524`, sin saber qué valor era de qué fecha; el modelo tomaba el primero (el más viejo) | Cada valor queda rotulado. Los encabezados se toman de la página: fechas "As of …", corridas de años "2025 2026 2025 2026" y grupos "Quarter Ended / Year To Date", que se combinan con los años. El contexto (título, "In millions") viaja con cada fila |
+| Las columnas con solo `$` corrían los rótulos (`2025=$; =96,428`) | Las celdas de símbolo de moneda no son valores, y el `$` pegado a un número se quita |
+| Números partidos en celdas ("5" + "4,190" para 54,190; "1" + "8" + "7,103") | Se unen de derecha a izquierda cuando el resultado es un número bien agrupado |
+| La fila "2025 \| 2026" quedaba como fila de datos y un fragmento de frase ("ne 30, 2026.") rotulaba como 2026 un valor de 2025 | Una fila de solo años es el encabezado, y el texto narrativo de arriba se descarta. Encabezados parciales o mezclados (años con fragmentos) no se usan: mejor "column 1/2" que un rótulo falso |
+| Inventario y cuentas por cobrar salían del flujo de caja (el cambio del trimestre) | Las partidas de balance piden el saldo al cierre. Si llegan de una columna de flujo, el ratio queda retenido (`engine.py`) |
+| "June 30, 2026" y "Q2 2026" se tomaban como periodos distintos | `period_key` / `same_period`: el cierre de trimestre equivale al trimestre, y el 31-dic al año (también en Compare) |
+| "Cost of revenues" y "Accounts receivable, net" marcados como dudosos | Sinónimo y sufijo ", net" aceptados |
+| **Ratios que combinaban empresas distintas** (activos de Andina con pasivos de Alphabet; con la misma moneda habría salido un número) | La extracción informa la empresa de cada cifra. Un ratio con entradas de distintas empresas sale "can't be calculated", con un aviso de elegir una sola |
+| Chat: el modelo daba la utilidad neta cuando se pedía el efectivo, con confianza alta | Si el triage dice que la cifra no está en las fuentes, la respuesta sale con confianza baja y escalamiento. El prompt prohíbe presentar otra línea como la pedida |
+
+Resultado con el LLM real y `period: "Q2 2026"`: los **13 ratios calculables son correctos** (current 2.72x, operating margin 34.0 %, ROE 17.5 %…). Gross y EBITDA margin quedan "can't be calculated" porque el comunicado no los reporta. En el chat, el EPS diluido sale 9.11 (antes 2.31). **Hay que volver a subir los PDF** cargados antes de este cambio.
+
+Pendiente, de BE-007: la búsqueda en español sobre un documento en inglés ("efectivo" contra "Cash") puede no encontrar la fila. Ahora responde "sin respuesta confiable" en vez de una cifra equivocada.
+
 ## Cambios de API
 
 | Endpoint | Cambio |
@@ -126,7 +146,7 @@ Probar el chat con `samples/` (Andina 2024/2025, Pacífico, presupuesto con fór
   - La mayoría corre sin base ni LLM, con un extractor falso.
   - Los de punta a punta usan ingesta real y LLM guionado. El de ROA ejercita la extracción en paralelo contra Postgres; otro simula la caída del LLM y verifica el 503.
   - Además, `tests/test_formula_context.py` (16), `tests/test_conflicts.py` (13) y nuevos casos en `test_confidence_ambiguity.py` cubren las correcciones del chat.
-  - La suite completa da **278 pasan, 0 fallan**, estable en corridas repetidas.
+  - La suite completa da **317 pasan, 0 fallan**, estable en corridas repetidas.
   - Antes fallaban 3 tests (`test_confidentiality`, `test_retrieval`, `test_conversation`); ya fallaban en la rama base, verificado con el código de `feature/fe-003-comparison`. La causa: corrían contra la base de desarrollo, cuyos documentos desplazaban los datos del test en el top-k, como avisa el handoff.
   - Se corrigió en `tests/conftest.py`: los tests usan su propia base (`findoc_rag_test`, o `TEST_DATABASE_URL`), que se crea, se migra y se vacía al iniciar cada corrida. La base de desarrollo ya no se toca.
 - **Frontend:** 11 nuevos en `RatiosView.test.tsx` y 2 en `client.test.ts`. Pasan los 60 de la suite y el typecheck.
