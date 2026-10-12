@@ -65,7 +65,8 @@ class _FakeChatModel:
 
 
 def _patch(monkeypatch, raw=None, triage=None):
-    responses = {LLMTriage: triage if triage is not None else LLMTriage()}
+    # Default: triage found the figure in the sources (no ambiguity, no judgment).
+    responses = {LLMTriage: triage if triage is not None else LLMTriage(metric_in_sources=True)}
     if raw is not None:
         responses[LLMGroundedAnswer] = raw
     monkeypatch.setattr(qa_graph_module, "get_chat_model", lambda: _FakeChatModel(responses))
@@ -428,3 +429,14 @@ def test_reply_to_a_clarification_is_combined_with_the_original_question():
     answered = [("What was revenue?", "Revenue for 2024 is 4,820,000 COP.")]
     assert resolve_clarification_reply("¿Y en 2025?", answered) == "¿Y en 2025?"
     assert resolve_clarification_reply("What was revenue?", []) == "What was revenue?"
+
+
+def test_answer_when_triage_found_no_source_with_the_figure_is_low_confidence(monkeypatch):
+    # Asked for cash; the only source is net income, which the model gave as cash.
+    raw = LLMGroundedAnswer(statements=[_statement("Cash was 28,196.")], self_confidence="high")
+    answer = _run(monkeypatch, "What was cash?", [make_chunk("Net income: 28,196")], raw,
+                  triage=LLMTriage(metric_in_sources=False))
+
+    assert answer.confidence.level == "low"
+    assert any("may not contain" in reason for reason in answer.confidence.reasons)
+    assert answer.escalation is not None

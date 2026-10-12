@@ -166,12 +166,19 @@ def assess_confidence(
     cited_scores: list[float],
     requires_judgment: bool = False,
     has_conflicts: bool = False,
+    metric_missing: bool = False,
 ) -> ConfidenceOut:
     """Score an answer where `kept_count` of the model's `proposed_count`
     statements survived grounding. `removed_figures` are the figures whose
     statements were dropped because the figure wasn't in their sources."""
     score = 1.0
     reasons: list[str] = []
+
+    if metric_missing:
+        # Triage found no source with the figure asked for, yet the model
+        # answered: likely another line item given as that one (net income as cash).
+        score -= 0.45
+        reasons.append("The sources may not contain the figure asked for")
 
     if has_conflicts:
         # Several values for one fact: none of them can be given as *the* answer.

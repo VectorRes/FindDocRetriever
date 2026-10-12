@@ -28,7 +28,7 @@ from langgraph.graph import END, StateGraph
 
 from app.config import get_settings
 from app.escalation import EscalationSuggestion, resolve_topic, suggest_escalation
-from app.figures.extraction import single_currency
+from app.figures.extraction import entity_key as _entity_key, period_key, single_currency
 from app.qa.confidence import _figures, _is_material, assess_confidence, unverified_figures
 from app.qa.llm import get_chat_model
 from app.qa.prompts import (
@@ -83,7 +83,9 @@ def triage_node(state: QAState) -> QAState:
         logger.warning("QA triage failed; answering without ambiguity/judgment checks", exc_info=True)
         triage = None
     if not isinstance(triage, LLMTriage):
-        triage = LLMTriage()
+        # Neutral when the pre-check failed: no clarification, no penalty for
+        # "the figure isn't in the sources" (which triage didn't get to say).
+        triage = LLMTriage(metric_in_sources=True)
     return {"source_map": source_map, "triage_result": triage}
 
 
@@ -91,16 +93,6 @@ MAX_CLARIFICATION_OPTIONS = 6
 
 
 # Legal-form suffixes ignored when telling entities apart ("Andina" = "Andina S.A.S.").
-_LEGAL_FORM = re.compile(
-    r"\b(s\.?\s?a\.?\s?s|s\.?\s?a|ltda|inc|ltd|llc|corp|corporation|company|co|plc|gmbh|s\.?\s?a\.?\s?de\s?c\.?\s?v)\b\.?",
-    re.IGNORECASE,
-)
-
-
-def _entity_key(value: str) -> str:
-    return " ".join(re.sub(r"[^\w\s]", " ", _LEGAL_FORM.sub(" ", value.lower())).split())
-
-
 def _distinct(values: list[str], key=lambda v: " ".join(v.lower().split())) -> list[str]:
     """Distinct values, keeping the first spelling of each (the longest when
     one is a fuller form of another, e.g. "Andina S.A.S." over "Andina")."""
@@ -259,22 +251,44 @@ def _statement_figures(statement: GroundedStatement) -> frozenset[float]:
     )
 
 
+_QUARTER_YEAR = re.compile(r"\b(?:q([1-4])|([1-4])q|([1-4])t)\s*(?:of\s+|de\s+|del\s+)?((?:19|20)\d{2})\b", re.IGNORECASE)
+_YEAR = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
+
+
+def _statement_period(statement: GroundedStatement, triage_periods: set[str]) -> str | None:
+    """The period a statement's figure is for. What the statement itself says
+    comes first ("revenue for Q2 2026 / for 2025"): triage gives one period
+    per source, which is wrong for a table row holding several years. Without
+    one, triage's period is used only if every cited source mentions a
+    single year; otherwise the period is unknown and no conflict is inferred."""
+    quarters = {f"q{next(g for g in m.groups()[:3] if g)} {m.group(4)}" for m in _QUARTER_YEAR.finditer(statement.text)}
+    if len(quarters) == 1:
+        return quarters.pop()
+    years = set(_YEAR.findall(statement.text))
+    if len(years) == 1:
+        return years.pop()
+    if years or len(triage_periods) != 1:
+        return None
+    if any(len(set(_YEAR.findall(c.text))) > 1 for c in statement.citations):
+        return None
+    return period_key(next(iter(triage_periods)))
+
+
 def detect_conflicts(statements: list[GroundedStatement], triage: LLMTriage, source_map: dict) -> None:
     """Flag disagreements the model didn't mark, using triage's per-source
     facts: statements citing the requested figure for the same entity,
     period and kind of figure (actual vs planned) that state different
     amounts are conflicting values of one fact."""
-    facts = {
-        m.source_id: (_entity_key(m.entity), " ".join(m.period.lower().split()))
-        for m in triage.metric_sources if m.entity and m.period
-    }
+    facts = {m.source_id: m for m in triage.metric_sources if m.entity and m.period}
     groups: dict[tuple, list[GroundedStatement]] = {}
     for statement in statements:
-        keys = {facts[c.source_id] for c in statement.citations if c.source_id in facts}
+        cited = [facts[c.source_id] for c in statement.citations if c.source_id in facts]
+        entities = {_entity_key(m.entity) for m in cited}
+        period = _statement_period(statement, {m.period for m in cited})
         figures = _statement_figures(statement)
-        if len(keys) != 1 or not figures:
+        if len(entities) != 1 or period is None or not figures:
             continue
-        key = (*keys.pop(), _figure_kind(statement), _statement_currency(statement))
+        key = (entities.pop(), period, _figure_kind(statement), _statement_currency(statement))
         groups.setdefault(key, []).append(statement)
     for group in groups.values():
         amounts = {_statement_figures(s) for s in group}
@@ -354,6 +368,7 @@ def ground_and_validate_node(state: QAState) -> QAState:
             cited_scores=cited_scores,
             requires_judgment=triage.requires_judgment,
             has_conflicts=any(s.conflicting for s in statements),
+            metric_missing=not triage.metric_in_sources,
         )
         if any(s.conflicting for s in statements):
             # Same as an unreconciled comparison (ID-HU-FE-003): consolidation owns it.

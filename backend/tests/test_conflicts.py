@@ -160,3 +160,36 @@ def test_conflicting_sources_make_the_answer_low_confidence():
 
     assert confidence.level == "low"
     assert any("disagree" in reason for reason in confidence.reasons)
+
+
+ROW_TWO_YEARS = ("alphabet.pdf", None,
+                 "Financial table page 6, row 'Revenues': Quarter Ended June 30 2025=96,428; Quarter Ended June 30 2026=119,796")
+
+
+def test_years_stated_by_each_statement_beat_triages_single_period_per_source():
+    # Triage tagged the row "2026", but it holds both years.
+    y2025 = _cited("Total revenues for 2025 are 96,428.", "S6", *ROW_TWO_YEARS)
+    y2026 = _cited("Total revenues for 2026 are 119,796.", "S6", *ROW_TWO_YEARS)
+    triage = _facts(("S6", "Alphabet", "2026"))
+
+    detect_conflicts([y2025, y2026], triage, {})
+
+    assert not y2025.conflicting and not y2026.conflicting
+
+
+def test_without_a_stated_year_a_multi_year_source_gives_no_period():
+    a = _cited("Total revenues are 96,428.", "S6", *ROW_TWO_YEARS)
+    b = _cited("Total revenues are 119,796.", "S6", *ROW_TWO_YEARS)
+
+    detect_conflicts([a, b], _facts(("S6", "Alphabet", "2026")), {})
+
+    assert not a.conflicting and not b.conflicting
+
+
+def test_quarters_of_one_year_are_different_periods():
+    q1 = _cited("Revenue for Q1 2026 is 109,896.", "S2", "a.pdf", None, "Q1 2026=109,896")
+    q2 = _cited("Revenue for Q2 2026 is 119,796.", "S3", "a.pdf", None, "Q2 2026=119,796")
+
+    detect_conflicts([q1, q2], _facts(("S2", "Alphabet", "2026"), ("S3", "Alphabet", "2026")), {})
+
+    assert not q1.conflicting and not q2.conflicting

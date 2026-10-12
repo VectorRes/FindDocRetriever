@@ -61,6 +61,13 @@ Excel cells). Follow these rules strictly:
 11. Write figures with thousands separators (610,000, not 610000), keeping \
    the sign and decimals of the source, and name the currency when a source \
    states it.
+12. Never give a different line item as the one asked for: if the question \
+   asks for cash and the SOURCES only have net income, the answer is not in \
+   the SOURCES (set unsupported=true). When a source row has several values \
+   (columns for different periods), take the one whose column label matches \
+   the period asked; if the labels don't say which column is which, don't \
+   pick one — say the sources don't make it clear and set self_confidence \
+   to "low".
 """
 
 # ID-HU-BE-009: run before generation, as its own focused task.
@@ -114,6 +121,23 @@ def describe_location(chunk: RetrievedChunk) -> str:
     return ", ".join(parts)
 
 
+TRIAGE_EXCERPT_CHARS = 220
+
+
+def _excerpt(text: str) -> str:
+    """A short excerpt of a source for triage. Table rows (Excel and PDF) put
+    their sheet/table context first; keep the row itself — label and values
+    by period — whole, and trim the context instead."""
+    text = " ".join(text.split())
+    for marker in ("), row '", "), "):
+        position = text.find(marker)
+        if position > 0 and len(text) > TRIAGE_EXCERPT_CHARS:
+            row = text[position + 2:]
+            room = max(TRIAGE_EXCERPT_CHARS - len(row), 60)
+            return f"{text[:room].rstrip()} …) {row}"
+    return text[:TRIAGE_EXCERPT_CHARS]
+
+
 def build_triage_prompt(
     question: str,
     source_map: dict[str, RetrievedChunk],
@@ -128,7 +152,7 @@ def build_triage_prompt(
         lines.append("")
     lines += [f"QUESTION: {question}", "", "SOURCES:"]
     for source_id, chunk in source_map.items():
-        excerpt = " ".join(chunk.text.split())[:220]
+        excerpt = _excerpt(chunk.text)
         lines.append(f"[{source_id}] ({describe_location(chunk)}) {excerpt}")
     return "\n".join(lines)
 
