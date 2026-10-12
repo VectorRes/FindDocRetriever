@@ -249,6 +249,8 @@ class ComparisonRowOut(BaseModel):
     citation: CitationOut | None = None
     confidence: str = "low"
     reason: str | None = None
+    period_coverage: str | None = None
+    column_header: str | None = None
     comparable_value: float | None = None
     converted: bool = False
     variance_abs: float | None = None
@@ -269,3 +271,82 @@ class ComparisonOut(BaseModel):
     exchange_rates: list[ExchangeRateOut] = []
     notes: list[str] = []
     escalation: EscalationOut | None = None
+
+
+# --- ID-HU-BE-010: financial ratio calculation -------------------------------
+
+class RatioRequest(BaseModel):
+    # The statements to calculate from (e.g. the income statement and the
+    # balance sheet); inputs are looked up across all of them.
+    document_ids: list[UUID] = Field(min_length=1, max_length=6)
+    # Optional: which period to take when a document holds several.
+    period: str | None = None
+    # Optional subsets; omit both for every ratio in the library.
+    ratios: list[str] | None = None
+    categories: list[str] | None = None
+
+
+class RatioInputOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    key: str
+    name: str
+    statement: str
+    found: bool
+    value: float | None = None
+    value_text: str | None = None
+    unit_scale: str = "units"
+    currency: str | None = None
+    period: str | None = None
+    label: str | None = None
+    period_coverage: str | None = None
+    column_header: str | None = None
+    document_id: UUID | None = None
+    document_filename: str | None = None
+    citation: CitationOut | None = None
+    confidence: str = "low"
+    needs_review: bool = False
+    reason: str | None = None
+    coverage_mismatch: bool = False
+    error: bool = False
+
+
+class RatioOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    key: str
+    name: str
+    category: str
+    formula: str
+    unit: str  # "percent" (value is a fraction) | "times"
+    description: str
+    status: str  # "calculated" | "needs_review" | "unavailable"
+    value: float | None = None
+    inputs: list[RatioInputOut]
+    citations: list[CitationOut]
+    cross_document: bool
+    currency: str | None = None
+    period: str | None = None
+    reasons: list[str] = []
+
+
+class RatioReportOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    period: str | None = None
+    document_ids: list[UUID]
+    ratios: list[RatioOut]
+    line_items: list[RatioInputOut]
+    notes: list[str] = []
+
+
+class RatioDefinitionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    key: str
+    name: str
+    category: str
+    formula: str
+    unit: str
+    description: str
+    inputs: list[str]

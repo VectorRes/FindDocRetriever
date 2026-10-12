@@ -12,10 +12,13 @@ import type { CitationOut, DocumentOut } from "./api/types";
 import Chat from "./components/Chat";
 import ComparisonView from "./components/ComparisonView";
 import DocumentList from "./components/DocumentList";
+import RatiosView from "./components/RatiosView";
 import SourceVerificationPanel from "./components/SourceVerificationPanel";
 
 type ApiStatus = "checking" | "online" | "offline";
-type View = "chat" | "compare";
+type View = "chat" | "compare" | "ratios";
+
+const VIEW_LABELS: Record<View, string> = { chat: "Chat", compare: "Compare", ratios: "Ratios" };
 
 // "Save as PDF" on the comparison (ID-HU-FE-003) uses the browser's print
 // dialog: everything marked .no-print is left out of the printout.
@@ -62,7 +65,7 @@ export default function App() {
         <div style={{ display: "flex", gap: "1.25rem", alignItems: "baseline" }}>
           <h1 style={{ fontSize: "1.4rem", margin: 0 }}>FinDoc Retriever</h1>
           <nav aria-label="Views" style={{ display: "flex", gap: "0.25rem" }}>
-            {(["chat", "compare"] as const).map((v) => (
+            {(["chat", "compare", "ratios"] as const).map((v) => (
               <button
                 key={v}
                 type="button"
@@ -70,7 +73,7 @@ export default function App() {
                 aria-pressed={view === v}
                 style={tabStyle(view === v)}
               >
-                {v === "chat" ? "Chat" : "Compare"}
+                {VIEW_LABELS[v]}
               </button>
             ))}
           </nav>
@@ -110,6 +113,9 @@ export default function App() {
         </div>
         <div hidden={view !== "compare"} style={{ flex: 1, minWidth: 0 }}>
           <ComparisonView onCitationClick={setSelectedCitation} active={view === "compare"} />
+        </div>
+        <div className="no-print" hidden={view !== "ratios"} style={{ flex: 1, minWidth: 0 }}>
+          <RatiosView onCitationClick={setSelectedCitation} active={view === "ratios"} />
         </div>
         {selectedCitation && (
           <SourceVerificationPanel

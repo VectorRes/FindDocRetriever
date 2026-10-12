@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     # ID-HU-FE-003: relative difference below which compared values count as
     # reconciling (0.001 = 0.1%, absorbs rounding but flags a 0.5% gap).
     comparison_tolerance: float = 0.001
+    # ID-HU-BE-010: ratio inputs extracted concurrently (one model call each).
+    # Keep it within the chat model provider's rate limit.
+    ratio_extraction_workers: int = 6
 
     # Comma-separated list of origins allowed to call the API (the frontend dev server, etc.)
     cors_allowed_origins_raw: str = "http://localhost:5173"

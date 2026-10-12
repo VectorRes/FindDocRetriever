@@ -144,6 +144,8 @@ export interface ComparisonRow {
   citation: CitationOut | null;
   confidence: string;
   reason: string | null;
+  period_coverage?: string | null;
+  column_header?: string | null;
   comparable_value: number | null;
   converted: boolean;
   variance_abs: number | null;
@@ -163,4 +165,68 @@ export interface Comparison {
   exchange_rates: ExchangeRate[];
   notes: string[];
   escalation: EscalationSuggestion | null;
+}
+
+// --- ID-HU-BE-010: financial ratios ---
+
+export type RatioCategory = "liquidity" | "solvency" | "profitability" | "efficiency";
+
+export interface RatioRequest {
+  // Statements to calculate from; each input is looked up across all of them.
+  document_ids: string[];
+  period?: string | null;
+  ratios?: string[] | null;
+  categories?: RatioCategory[] | null;
+}
+
+export interface RatioInput {
+  key: string;
+  name: string;
+  statement: string;
+  found: boolean;
+  value: number | null;
+  value_text: string | null;
+  unit_scale: string;
+  currency: string | null;
+  period: string | null;
+  label: string | null;
+  // "three_months", "nine_months", "point_in_time"... and the column it was read from.
+  period_coverage?: string | null;
+  column_header?: string | null;
+  document_id: string | null;
+  document_filename: string | null;
+  citation: CitationOut | null;
+  confidence: string;
+  // The label isn't a standard name for this input: the analyst should confirm it.
+  needs_review: boolean;
+  reason: string | null;
+  // Covers a different length of time than the requested period (likely the wrong column).
+  coverage_mismatch?: boolean;
+  // Not found because the model service failed, not because it's missing.
+  error?: boolean;
+}
+
+export interface Ratio {
+  key: string;
+  name: string;
+  category: RatioCategory;
+  formula: string;
+  unit: "percent" | "times"; // percent: value is a fraction (0.25 = 25%)
+  description: string;
+  status: "calculated" | "needs_review" | "unavailable";
+  value: number | null;
+  inputs: RatioInput[];
+  citations: CitationOut[];
+  cross_document: boolean;
+  currency: string | null;
+  period: string | null;
+  reasons: string[];
+}
+
+export interface RatioReport {
+  period: string | null;
+  document_ids: string[];
+  ratios: Ratio[];
+  line_items: RatioInput[];
+  notes: string[];
 }

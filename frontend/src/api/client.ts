@@ -7,6 +7,8 @@ import type {
   DocumentOut,
   DocumentResolutionOut,
   QueryRequest,
+  RatioReport,
+  RatioRequest,
 } from "./types";
 
 const API_URL = import.meta.env.VITE_API_URL;
@@ -65,6 +67,18 @@ export function setUserRole(role: UserRole): void {
 
 function roleHeaders(): Record<string, string> {
   return { "X-User-Role": currentRole };
+}
+
+// FastAPI errors come as {"detail": "..."}: show the message, not the JSON.
+export async function readErrorDetail(res: Response): Promise<string> {
+  const body = await res.text().catch(() => "");
+  try {
+    const parsed = JSON.parse(body);
+    if (typeof parsed?.detail === "string") return parsed.detail;
+  } catch {
+    // Not JSON (e.g. a proxy's HTML error page): fall through to the raw text.
+  }
+  return body;
 }
 
 export class ApiError extends Error {
@@ -217,7 +231,7 @@ export async function compareDocuments(request: CompareRequest): Promise<Compari
       signal: controller.signal,
     });
     if (!res.ok) {
-      const detail = await res.text().catch(() => "");
+      const detail = await readErrorDetail(res);
       throw new ApiError(detail || `Comparison failed with status ${res.status}`, "http", res.status);
     }
     return (await res.json()) as Comparison;
@@ -243,4 +257,34 @@ export async function exportComparison(comparison: Comparison): Promise<Blob> {
     throw new ApiError(`Export failed with status ${res.status}`, "http", res.status);
   }
   return res.blob();
+}
+
+// ID-HU-BE-010. One model call per ratio input (and per document tried), so
+// calculating the whole library takes longer than a comparison.
+const RATIOS_TIMEOUT_MS = 180_000;
+
+export async function calculateRatios(request: RatioRequest): Promise<RatioReport> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), RATIOS_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${API_URL}/ratios`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...roleHeaders() },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const detail = await readErrorDetail(res);
+      throw new ApiError(detail || `Ratio calculation failed with status ${res.status}`, "http", res.status);
+    }
+    return (await res.json()) as RatioReport;
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new ApiError("The ratio calculation took too long to respond.", "timeout");
+    }
+    throw new ApiError("Could not reach the FinDoc Retriever API.", "network");
+  } finally {
+    clearTimeout(timeout);
+  }
 }
