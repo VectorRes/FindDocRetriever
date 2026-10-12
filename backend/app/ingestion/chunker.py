@@ -27,23 +27,52 @@ class Chunk:
     confidence_label: str | None = None
 
 
-def _header_row(sheet: ParsedSheet) -> tuple[int | None, dict[int, str]]:
+# Title/notes rows above the header that are repeated into every row chunk.
+MAX_PREAMBLE_ROWS = 3
+MAX_PREAMBLE_CHARS = 240
+
+
+def _header_row(sheet: ParsedSheet) -> tuple[int | None, dict[int, str], list[str]]:
+    """The header row, its labels, and the preamble above it.
+
+    Financial statements usually open with a title and notes ("Andina S.A.S. —
+    Estado de resultados — Año 2024", "Cifras en pesos colombianos (COP)")
+    before the real header ("Concepto | 2024"). So the header is the first row
+    with at least two distinct values — a title, even merged across columns,
+    has one — falling back to the first row (e.g. single-column sheets). Rows
+    above it are kept as preamble: they carry the entity, period and currency
+    that every figure in the sheet depends on."""
     if not sheet.cells:
-        return None, {}
-    first_row = min(cell.row for cell in sheet.cells)
-    headers = {cell.column: cell.value for cell in sheet.cells if cell.row == first_row and cell.value}
-    return first_row, headers
+        return None, {}, []
+    rows: dict[int, list] = {}
+    for cell in sheet.cells:
+        if cell.value:
+            rows.setdefault(cell.row, []).append(cell)
+    if not rows:
+        return None, {}, []
+    ordered = sorted(rows)
+    header_row = next((r for r in ordered if len({c.value for c in rows[r]}) >= 2), ordered[0])
+    headers = {cell.column: cell.value for cell in rows[header_row]}
+    preamble = [
+        " ".join(dict.fromkeys(str(c.value) for c in sorted(rows[r], key=lambda c: c.column)))
+        for r in ordered if r < header_row
+    ][:MAX_PREAMBLE_ROWS]
+    return header_row, headers, preamble
 
 
 def chunk_sheet(sheet: ParsedSheet) -> list[Chunk]:
     if sheet.is_empty:
         return []
-    header_row_number, headers = _header_row(sheet)
+    header_row_number, headers, preamble = _header_row(sheet)
+    context = " · ".join(preamble)[:MAX_PREAMBLE_CHARS]
+    sheet_label = f"Sheet '{sheet.name}' ({context})" if context else f"Sheet '{sheet.name}'"
     rows: dict[int, list] = {}
     for cell in sheet.cells:
         rows.setdefault(cell.row, []).append(cell)
     chunks: list[Chunk] = []
     for row_number, row_cells in sorted(rows.items()):
+        if header_row_number is not None and row_number < header_row_number and preamble:
+            continue  # folded into every chunk as context
         if row_number == header_row_number and headers:
             continue
         row_cells = sorted(row_cells, key=lambda c: c.column)
@@ -55,12 +84,12 @@ def chunk_sheet(sheet: ParsedSheet) -> list[Chunk]:
                 piece += f" (formula: {cell.formula})"
             parts.append(piece)
         row_label = row_cells[0].value or f"row {row_number}"
-        text = f"Sheet '{sheet.name}', {row_label}: " + "; ".join(parts)
+        text = f"{sheet_label}, {row_label}: " + "; ".join(parts)
         min_col = get_column_letter(row_cells[0].column)
         max_col = get_column_letter(row_cells[-1].column)
         chunks.append(Chunk(sheet_name=sheet.name, cell_range=f"{min_col}{row_number}:{max_col}{row_number}", text=text))
     if headers:
-        chunks.append(Chunk(sheet_name=sheet.name, cell_range=None, text=f"Sheet '{sheet.name}' has columns: {', '.join(headers.values())}."))
+        chunks.append(Chunk(sheet_name=sheet.name, cell_range=None, text=f"{sheet_label} has columns: {', '.join(map(str, headers.values()))}."))
     return chunks
 
 
