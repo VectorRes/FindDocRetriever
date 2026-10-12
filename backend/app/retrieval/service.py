@@ -24,6 +24,14 @@ class RetrievedChunk:
     confidence: float | None = None
     confidence_label: str | None = None
     confidentiality_tag: str = "restricted"
+    # Cosine similarity to the question (1 - cosine distance); higher is more relevant.
+    score: float | None = None
+
+
+def _min_score(min_score: float | None) -> float | None:
+    """`min_score` if given, else RETRIEVAL_MIN_SCORE; 0 or less means no floor."""
+    value = get_settings().retrieval_min_score if min_score is None else min_score
+    return value if value > 0 else None
 
 
 def _allowed_tags(db: Session, roles: set[str]) -> set[str]:
@@ -39,18 +47,26 @@ def retrieve(
     user_roles: str | None = "analyst",
     user_id: str | None = "anonymous",
     document_id: UUID | None = None,
+    min_score: float | None = None,
 ) -> list[RetrievedChunk]:
-    """Nearest accessible chunks to `question`, from each document's default
-    version — or only from `document_id` when given (ID-HU-BE-015)."""
+    """Nearest accessible chunks to `question`, ranked by relevance, from each
+    document's default version — or only from `document_id` when given
+    (ID-HU-BE-015).
+
+    ID-HU-BE-007: only chunks the user's roles may see are considered, and
+    only those at least `min_score` similar to the question (default
+    RETRIEVAL_MIN_SCORE). When nothing is relevant the list is empty."""
     settings = get_settings()
     provider = get_embedding_provider()
     [query_embedding] = provider.embed([question])
     roles = parse_roles(user_roles)
     allowed_tags = _allowed_tags(db, roles)
-    chunks = similarity_search(
+    matches = similarity_search(
         db, query_embedding, top_k or settings.retrieval_top_k,
         accessible_tags=allowed_tags, document_id=document_id,
+        min_score=_min_score(min_score),
     )
+    chunks = [chunk for chunk, _ in matches]
 
     # Every returned source is an auditable retrieval. This deliberately logs
     # authorized restricted access too, not only denied attempts.
@@ -87,8 +103,9 @@ def retrieve(
             confidence=chunk.confidence,
             confidence_label=chunk.confidence_label,
             confidentiality_tag=chunk.confidentiality_tag,
+            score=round(score, 4),
         )
-        for chunk in chunks
+        for chunk, score in matches
     ]
 
 def restricted_match_exists(
@@ -97,7 +114,11 @@ def restricted_match_exists(
     top_k: int | None = None,
     user_roles: str | None = "analyst",
     document_id: UUID | None = None,
+    min_score: float | None = None,
 ) -> bool:
+    """Whether content the user can't see is among the matches for
+    `question`. Only relevant matches (see `retrieve`) count, so the
+    "restricted information" notice isn't shown for unrelated questions."""
     settings = get_settings()
     provider = get_embedding_provider()
     [query_embedding] = provider.embed([question])
@@ -105,5 +126,5 @@ def restricted_match_exists(
     allowed_tags = _allowed_tags(db, roles)
     return has_inaccessible_match(
         db, query_embedding, allowed_tags, top_k or settings.retrieval_top_k,
-        document_id=document_id,
+        document_id=document_id, min_score=_min_score(min_score),
     )

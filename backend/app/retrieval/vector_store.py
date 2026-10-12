@@ -50,14 +50,21 @@ def similarity_search(
     top_k: int,
     accessible_tags: set[str] | None = None,
     document_id: UUID | None = None,
-) -> list[Chunk]:
-    # Apply confidentiality and version scope before LIMIT so excluded chunks
-    # never consume retrieval slots and never reach the generation model.
-    stmt = select(Chunk).where(_version_scope(document_id))
+    min_score: float | None = None,
+) -> list[tuple[Chunk, float]]:
+    """Nearest chunks with their cosine similarity (1 - cosine distance,
+    higher is more relevant), best first."""
+    # Apply confidentiality, version scope and the relevance floor before
+    # LIMIT so excluded chunks never consume retrieval slots and never reach
+    # the generation model.
+    distance = Chunk.embedding.cosine_distance(query_embedding)
+    stmt = select(Chunk, distance).where(_version_scope(document_id))
     if accessible_tags is not None:
         stmt = stmt.where(Chunk.confidentiality_tag.in_(accessible_tags))
-    stmt = stmt.order_by(Chunk.embedding.cosine_distance(query_embedding)).limit(top_k)
-    return list(db.scalars(stmt))
+    if min_score is not None:
+        stmt = stmt.where(distance <= 1 - min_score)
+    stmt = stmt.order_by(distance).limit(top_k)
+    return [(chunk, 1 - float(dist)) for chunk, dist in db.execute(stmt)]
 
 def has_inaccessible_match(
     db: Session,
@@ -65,13 +72,12 @@ def has_inaccessible_match(
     accessible_tags: set[str],
     top_k: int,
     document_id: UUID | None = None,
+    min_score: float | None = None,
 ) -> bool:
-    # Check only the nearest matches. Their text is never passed to QA.
-    stmt = (
-        select(Chunk.confidentiality_tag)
-        .where(_version_scope(document_id))
-        .order_by(Chunk.embedding.cosine_distance(query_embedding))
-        .limit(top_k)
-    )
-    tags = db.scalars(stmt).all()
+    # Check only the nearest relevant matches. Their text is never passed to QA.
+    distance = Chunk.embedding.cosine_distance(query_embedding)
+    stmt = select(Chunk.confidentiality_tag).where(_version_scope(document_id))
+    if min_score is not None:
+        stmt = stmt.where(distance <= 1 - min_score)
+    tags = db.scalars(stmt.order_by(distance).limit(top_k)).all()
     return any(tag not in accessible_tags for tag in tags)

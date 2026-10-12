@@ -19,6 +19,8 @@ Archivos que tocamos los dos (coordinemos antes de cambiarlos):
 
 ## BE-007 — Tareas pendientes que te tocan
 
+> **Estado (rama `feature/be-010-financial-ratio-calculation`):** los puntos 1–3 están hechos. `RetrievedChunk.score`, `RETRIEVAL_MIN_SCORE` (0.25, calibrado con `text-embedding-3-small`), el aviso de restringido solo con coincidencias relevantes, y `WEAK_RELEVANCE` recalibrado a 0.3. La diversidad multi-documento está en `qa/query_expansion.py`. Ver la sección "Recuperación de fuentes relevantes" del README.
+
 ### 1. Umbral de relevancia (acordado como tuyo)
 
 Hoy el retrieval siempre devuelve los `top_k` chunks más cercanos, aunque ninguno tenga que ver con la pregunta. Eso es el caso alterno 2 de BE-007 ("returns no relevant sources") y también el primer criterio de BE-009.

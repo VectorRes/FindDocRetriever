@@ -56,6 +56,8 @@ class RetrievedChunkOut(BaseModel):
     extraction_method: str = "native"
     confidence: float | None = None
     confidence_label: str | None = None
+    # ID-HU-BE-007: relevance to the question (cosine similarity, higher is better).
+    score: float | None = None
 
 
 class PdfTableOut(BaseModel):

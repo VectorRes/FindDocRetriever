@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     retrieval_top_k: int = 8
+    # ID-HU-BE-007: chunks less similar than this to the question (cosine
+    # similarity, 0-1) are not relevant and aren't retrieved; 0 disables it.
+    # Calibrated for text-embedding-3-small: off-topic questions score <= 0.18
+    # against financial statements, questions they answer >= 0.33.
+    retrieval_min_score: float = 0.25
     # ID-HU-FE-003: relative difference below which compared values count as
     # reconciling (0.001 = 0.1%, absorbs rounding but flags a 0.5% gap).
     comparison_tolerance: float = 0.001

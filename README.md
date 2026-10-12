@@ -41,6 +41,7 @@ servirlos de nuevo desde el panel de verificación de fuente del frontend.
 | `OPENAI_API_KEY`, `OPENAI_EMBEDDING_MODEL`, `OPENAI_EMBEDDING_DIMENSIONS` | Config del proveedor `openai` |
 | `LOCAL_EMBEDDING_MODEL`, `LOCAL_EMBEDDING_DIMENSIONS` | Config del proveedor `local` (sentence-transformers, corre en el mismo contenedor, sin llamadas externas) |
 | `RETRIEVAL_TOP_K` | Cantidad de chunks devueltos por consulta |
+| `RETRIEVAL_MIN_SCORE` | Similitud coseno mínima (0–1) para que un chunk cuente como relevante; `0` lo desactiva. `0.25` está calibrado para `text-embedding-3-small` — ver [Recuperación de fuentes relevantes](#recuperación-de-fuentes-relevantes-id-hu-be-007) |
 | `PDF_CHUNK_SIZE`, `PDF_CHUNK_OVERLAP` | Tamaño (caracteres) y solape de la ventana deslizante usada para trocear el texto de cada página PDF |
 | `PDF_OCR_ENABLED` | Si es `false`, las páginas sin texto nativo se marcan como fallidas en vez de pasar por OCR |
 | `PDF_OCR_DPI` | Resolución con la que se renderiza cada página a imagen antes de correr Tesseract |
@@ -111,7 +112,8 @@ momento de migrar). Para comparar `openai` vs `local`, lo más simple es usar ba
   `sheet_name`+`cell_range` (Excel), `page_number` (PDF), `content_type`
   (`text`/`table_row`/`reference`), `reference_number` (para chunks de
   notas/secciones), y `extraction_method`/`confidence`/`confidence_label`
-  (`native`/`ocr` y su confianza, para chunks de PDF).
+  (`native`/`ocr` y su confianza, para chunks de PDF), y `score` (similitud
+  con la pregunta, de mayor a menor). Si nada es relevante, `results` es `[]`.
 - `GET /documents/{document_id}/pdf-structure` — para un documento `pdf`, devuelve
   todas sus tablas financieras (`headers`, `rows`, `confidence`,
   `confidence_label`, `raw_text`) y todas sus notas/secciones detectadas
@@ -151,8 +153,8 @@ El pipeline de QA (`qa/graph.py`) es `triage -> (clarify | generate -> ground_an
 - **`confidence`** (`level` high/medium/low, `score` 0–1, `reasons[]`) para cada
   respuesta, a partir de: afirmaciones descartadas, cifras no verificadas,
   autoconfianza del modelo, si la pregunta pide un juicio profesional, y la
-  relevancia de las fuentes citadas cuando el retrieval provea `score` (ver
-  [handoff de BE-007](docs/HANDOFF_BE-007_BE-010.md)).
+  relevancia de las fuentes citadas (`score` del retrieval; un promedio menor a
+  `WEAK_RELEVANCE` = 0.3 baja la confianza).
 - **`escalation`** (`team`, `topic`, `reason`) cuando no hay respuesta o la
   confianza es baja. El mapeo tema → equipo está en `app/escalation.py`
   (`TOPIC_TEAMS`, editable): reconocimiento de ingresos / contabilidad /
@@ -198,6 +200,35 @@ Endpoints:
 
 Los documentos existentes antes de la migración `0012_version_control` quedan
 como `approved` (ya se estaban usando para responder).
+
+### Recuperación de fuentes relevantes (ID-HU-BE-007)
+
+`retrieve()` (`app/retrieval/service.py`) busca los chunks (filas/celdas de
+Excel, texto/tablas/notas de PDF) más cercanos a la pregunta en todos los
+documentos, en la versión por defecto de cada uno:
+
+- **Ranking:** cada fuente trae `score` (similitud coseno, `1 - distancia`) y
+  vienen de mayor a menor.
+- **Permisos:** solo se consideran chunks cuya etiqueta de confidencialidad
+  permite el rol del usuario; el filtro corre en SQL antes del `LIMIT`, así que
+  el contenido restringido nunca ocupa lugares ni llega al modelo.
+- **Umbral de relevancia:** se descartan los chunks con `score` menor a
+  `RETRIEVAL_MIN_SCORE` (también antes del `LIMIT`). Si nada pasa el umbral, la
+  lista es vacía y `/query/answer` responde "no confident answer" sin llamar al
+  modelo. Con `text-embedding-3-small` sobre los estados de ejemplo, las
+  preguntas fuera de tema puntúan ≤ 0.18 y las que los documentos responden
+  ≥ 0.33. Con otro modelo (p. ej. `EMBEDDING_PROVIDER=local`) hay que
+  recalibrar.
+- **Aviso de información restringida:** solo aparece si la coincidencia
+  restringida también supera el umbral (antes salía en casi cualquier
+  pregunta).
+- **Varios documentos:** el chat (`retrieve_for_question`) limita a cada
+  documento al 60 % de las fuentes y busca en ambos idiomas (sección
+  siguiente), así que una pregunta como "¿la utilidad neta concilia con el
+  punto de partida del flujo de efectivo?" trae filas del estado de resultados
+  y del flujo de caja.
+- La extracción de cifras de ratios/comparación (`extract_figure`) no usa el
+  umbral: el documento ya está elegido y el modelo decide si la cifra está.
 
 ### Lectura de tablas PDF y búsqueda del chat
 
@@ -472,6 +503,9 @@ docker compose exec api pytest
 - La imagen copia `tests/` al construirse; para correr los tests actuales sin
   reconstruir: `docker compose cp backend/tests/. api:/app/tests/` y luego
   `docker compose exec api pytest`.
+- `RETRIEVAL_MIN_SCORE` se pone en `0` en los tests (el embedding falso de
+  `conftest.py` tiene otra escala); `test_relevant_source_retrieval.py` cubre
+  los escenarios de BE-007 pasando `min_score` explícito.
 - `test_excel_parser.py`, `test_pdf_parser.py`, `test_chunker.py`, `test_pdf_chunker.py`
   no requieren base de datos. Los de PDF generan sus propios archivos `.pdf`
   mínimos en `tests/pdf_helpers.py`, sin depender de una librería de autoría de
