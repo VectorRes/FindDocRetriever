@@ -15,6 +15,7 @@
 The model is only involved inside `extract_figure` (one call per input and
 document tried), whose values are verified to appear in their source.
 """
+import re
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -23,7 +24,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from app.figures.extraction import UNIT_SCALES, ExtractedFigure, ExtractionServiceError, distinct_periods, entity_key, extract_figure
+from app.figures.extraction import UNIT_SCALES, ExtractedFigure, ExtractionServiceError, column_of, distinct_periods, entity_key, extract_figure
 from app.qa.schemas import ResolvedCitation
 from app.ratios.formulas import CATEGORIES, LINE_ITEMS, POSITIVE_ITEMS, RATIOS, LineItem, RatioDefinition
 from app.ratios.mapping import label_matches, statement_hint_score
@@ -144,6 +145,21 @@ def to_mapped_input(item: LineItem, document, figure: ExtractedFigure) -> Mapped
         issues["coverage"] = (
             f"{item.name} is a balance-sheet amount, but this value covers "
             f"{figure.period_coverage.replace('_', ' ')}{header}; it may be a cash-flow change, not the balance."
+        )
+    source_text = figure.citation.text if figure.citation else ""
+    from_pdf = bool(figure.citation and figure.citation.page_number is not None)
+    if (
+        item.statement == "income_statement"
+        and (from_pdf or _MULTI_PERIOD.search(source_text))
+        and not column_of(figure.value_text, source_text)
+    ):
+        # Read from PDF text with no column labels: statements usually have
+        # several period columns (quarter, year to date, prior year) and
+        # nothing confirms which one this is — the model's own column claim
+        # isn't evidence.
+        issues["coverage"] = (
+            f"{item.name} was read from text without column labels, so its period column couldn't be "
+            "confirmed; check it's the right one."
         )
     needs_review = not label_matches(item, figure.label)
     if needs_review:
@@ -315,7 +331,7 @@ def compute_ratio(definition: RatioDefinition, mapped: dict[str, MappedInput]) -
     result.value = value
     result.status = "calculated"
 
-    periods = distinct_periods([i.period for i in inputs])
+    periods = distinct_periods([_comparable_period(i) for i in inputs])
     if len(periods) > 1:
         result.status = "needs_review"
         result.reasons.append(
@@ -364,6 +380,49 @@ def compute_ratio(definition: RatioDefinition, mapped: dict[str, MappedInput]) -
             # Not enough to hold the ratio back, but the analyst should see it.
             result.reasons.append(f"{i.name}: {i.reason}")
     return result
+
+
+_MULTI_PERIOD = re.compile(
+    r"months ended|quarters? ended|year to date|year-to-date|meses terminados|trimestre terminado|acumulado",
+    re.IGNORECASE,
+)
+_END_DATE = re.compile(
+    r"[A-Z][a-z]+\.?\s+\d{1,2},?\s*(?:19|20)\d{2}"           # June 27, 2026
+    r"|\d{1,2}\s+[A-Z][a-z]+\.?\s+(?:19|20)\d{2}"            # 31 December 2025
+    r"|\d{1,2}\s+de\s+[A-Za-záéíóú]+\s+del?\s+(?:19|20)\d{2}"  # 31 de diciembre de 2025
+)
+
+
+def _comparable_period(i: MappedInput) -> str | None:
+    """The period to compare inputs by: the end date in the column the value
+    was read from when it has one ("Three Months Ended June 27, 2026" and the
+    balance "June 27, 2026" are one period, even if the model called one of
+    them "Q3 2026" — a fiscal quarter that a calendar can't tell), else the
+    period the model reported."""
+    if i.column_header:
+        dates = _END_DATE.findall(i.column_header)
+        if dates:
+            return dates[-1]
+    return i.period
+
+
+def flag_odd_coverage(mapped: dict[str, MappedInput]) -> None:
+    """Income-statement inputs should all cover the same span. When most come
+    from the quarter and one from nine months (a statement with both kinds of
+    column), hold the odd one out; on a tie, the quarter wins."""
+    flows = [i for i in mapped.values() if i.found and i.statement == "income_statement" and i.period_coverage]
+    counts: dict[str, int] = {}
+    for i in flows:
+        counts[i.period_coverage] = counts.get(i.period_coverage, 0) + 1
+    if len(counts) < 2:
+        return
+    usual = max(counts, key=lambda c: (counts[c], c == "three_months"))
+    for i in flows:
+        if i.period_coverage != usual:
+            i.coverage_mismatch = True
+            note = (f"{i.name} covers {i.period_coverage.replace('_', ' ')} while the other income-statement "
+                    f"inputs cover {usual.replace('_', ' ')}.")
+            i.reason = f"{note} {i.reason}" if i.reason else note
 
 
 def _distinct_entities(inputs) -> list[str]:
@@ -418,6 +477,7 @@ def calculate_ratios(
         db, documents, item_keys, period=period, user_roles=user_roles, user_id=user_id,
         extractor=extractor, session_factory=session_factory, max_workers=max_workers,
     )
+    flag_odd_coverage(mapped)
     ratios = [compute_ratio(definition, mapped) for definition in definitions]
 
     notes = [
@@ -439,7 +499,7 @@ def calculate_ratios(
             f"The selected documents belong to different companies ({', '.join(companies)}). "
             "Ratios combine one company's statements: select only that company's documents."
         )
-    if period is None and len(distinct_periods([i.period for i in found])) > 1:
+    if period is None and len(distinct_periods([_comparable_period(i) for i in found])) > 1:
         notes.append(
             "The statements contain several periods and the inputs didn't all come from the same one. "
             "Specify a period (e.g. FY2024 or Q3 2026) so every ratio uses figures from that period."

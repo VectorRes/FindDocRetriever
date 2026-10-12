@@ -729,3 +729,50 @@ def test_an_undocumented_scale_claim_is_not_a_review_reason(statements):
                     issues={"scale": claim}, reason=claim)
     mapped = to_mapped_input(LINE_ITEMS["current_assets"], balance, figure)
     assert mapped.confidence == "high" and mapped.reason is None
+
+
+def test_inputs_are_compared_by_the_end_date_of_their_column(statements):
+    income, balance = statements
+    _, ratios, _ = _run({income: INCOME_STATEMENT, balance: BALANCE_SHEET}, [income, balance], ratio_keys=["roa"],
+                        overrides={"net_income": {"period": "Q3 2026", "column_header": "Three Months Ended June 27, 2026"},
+                                   "total_assets": {"period": "June 27, 2026", "column_header": "June 27, 2026"}})
+    assert ratios["roa"].status == "calculated"
+
+
+def test_section_prefixed_labels_still_map():
+    assert label_matches(LINE_ITEMS["inventory"], "Current assets: Inventories")
+    assert not label_matches(LINE_ITEMS["revenue"], "Cost of sales: Products")
+
+
+def test_flow_read_from_unlabelled_multi_period_text_is_held(statements):
+    income, _ = statements
+    text = "STATEMENTS OF OPERATIONS Three Months Ended Nine Months Ended ... Total cost of sales 54,647 50,318 185,575 166,835"
+    figure = _found(income, "Total cost of sales", 166_835, confidence="high")
+    figure.citation = ResolvedCitation("S1", str(income.id), income.filename, None, None, 4, None, text)
+    mapped = to_mapped_input(LINE_ITEMS["cost_of_sales"], income, figure)
+    assert mapped.coverage_mismatch and "without column labels" in mapped.reason
+
+    # Any PDF text without labels, even when the window lost the "Months Ended" header.
+    plain = _found(income, "Total cost of sales", 166_835, confidence="high", period_coverage="three_months")
+    plain.citation = ResolvedCitation("S1", str(income.id), income.filename, None, None, 4, None, "Total cost of sales 54,647 50,318 185,575 166,835")
+    assert to_mapped_input(LINE_ITEMS["cost_of_sales"], income, plain).coverage_mismatch
+
+
+def test_flow_from_a_labelled_row_is_not_held(statements):
+    income, _ = statements
+    text = "row 'Total cost of sales': Three Months Ended June 27, 2026=54,647; Nine Months Ended June 27, 2026=185,575"
+    figure = _found(income, "Total cost of sales", 54_647, confidence="high", period_coverage="three_months")
+    figure.citation = ResolvedCitation("S1", str(income.id), income.filename, None, None, 4, None, text)
+    assert not to_mapped_input(LINE_ITEMS["cost_of_sales"], income, figure).coverage_mismatch
+
+
+def test_a_flow_covering_another_span_than_the_rest_is_held(statements):
+    income, balance = statements
+    report, ratios, _ = _run({income: INCOME_STATEMENT, balance: BALANCE_SHEET}, [income, balance],
+                             ratio_keys=["inventory_turnover", "gross_margin"], overrides={
+                                 "cost_of_sales": {"period_coverage": "nine_months"},
+                                 "revenue": {"period_coverage": "three_months"},
+                                 "gross_profit": {"period_coverage": "three_months"}})
+    assert ratios["inventory_turnover"].status == "needs_review"
+    assert any("covers nine months" in reason for reason in ratios["inventory_turnover"].reasons)
+    assert ratios["gross_margin"].status == "calculated"

@@ -51,8 +51,11 @@ def normalize_label(label: str) -> str:
 def label_matches(item: LineItem, label: str | None) -> bool:
     if not label:
         return False
-    normalized = normalize_label(label)
-    return bool(normalized) and normalized in {normalize_label(accepted) for accepted in item.accepted_labels}
+    accepted = {normalize_label(name) for name in item.accepted_labels}
+    # PDF table rows carry their section ("Current assets: Inventories"); the
+    # line item is the part after it.
+    candidates = {normalize_label(label), normalize_label(label.rsplit(":", 1)[-1])}
+    return any(candidate and candidate in accepted for candidate in candidates)
 
 
 def statement_hint_score(statement: Statement, names: list[str]) -> int:
