@@ -148,12 +148,31 @@ def chunk_pdf_page(page: ParsedPdfPage, chunk_size: int = 1000, chunk_overlap: i
 # column ("$ 96,428") is not a value and must not take the value's header.
 _CURRENCY_CELL = re.compile(r"^\s*(\$|US\$|€|£|¥|COP|USD|EUR)\s*$")
 # Column headings found in the text above a table, in reading order.
-_POINT_IN_TIME = re.compile(r"\b(?:As of|As at|At)\s+[A-Z][a-z]+\.?\s+\d{1,2},\s*\d{4}")
+# Dates as statements write them: "June 27, 2026", "31 December 2025",
+# "31 de diciembre de 2025".
+_DATE = (
+    r"(?:[A-Z][a-z]+\.?\s+\d{1,2},\s*(?:19|20)\d{2}"
+    r"|\d{1,2}\s+[A-Z][a-z]+\.?\s+(?:19|20)\d{2}"
+    r"|\d{1,2}\s+de\s+[A-Za-záéíóúÁÉÍÓÚ]+\s+de(?:l)?\s+(?:19|20)\d{2})"
+)
+_POINT_IN_TIME = re.compile(rf"\b(?:As of|As at|At|Al|A)\s+{_DATE}")
 _PERIOD_GROUP = re.compile(
-    r"\b(?:(?:Three|Six|Nine|Twelve) Months Ended|Quarters? Ended|Years? Ended|Year To Date|Year-to-Date)"
-    r"\s+[A-Z][a-z]+\.?\s+\d{1,2}",
+    r"\b((?:Three|Six|Nine|Twelve) Months Ended|Quarters? Ended|Years? Ended|Year To Date|Year-to-Date"
+    r"|(?:Tres|Seis|Nueve|Doce) meses terminados?(?: el)?|Trimestres? terminados?(?: el)?"
+    r"|Semestres? terminados?(?: el)?|A[ñn]os? terminados?(?: el)?|Acumulado(?: a| al)?)"
+    # The group's own day ("Quarter Ended June 30"), not a full date that is a
+    # column heading ("Nine Months Ended June 27, 2026 June 28, 2025"). A year
+    # right after the day that starts a run of years ("June 30, 2025 2026
+    # 2025 2026") is a column heading, so the day is still the group's.
+    r"(\s+[A-Z][a-z]+\.?\s+\d{1,2}(?!\d)(?!,?\s*(?:19|20)\d{2}(?!\s+(?:19|20)\d{2}))"
+    r"|\s+\d{1,2}\s+de\s+[a-záéíóú]+(?!\s+de\s+\d))?",
     re.IGNORECASE,
 )
+# Full dates, e.g. the column headings under period groups.
+_FULL_DATE = re.compile(rf"\b{_DATE}\b")
+HEADING_WINDOW_CHARS = 400
+# The heading of a column of note references ("Nota 5", "Note 12").
+_NOTE_HEADING = re.compile(r"\b(?:notas?|notes?)\b", re.IGNORECASE)
 MAX_TABLE_CONTEXT_CHARS = 320
 # Something a period column header contains: a year, a quarter or a month.
 _PERIOD_TOKEN = re.compile(
@@ -181,8 +200,15 @@ def _table_preamble(rows: list[list[str]], page_text: str) -> str:
     """The page text before the table's first row: title, units ("In
     millions") and column headings, which pdfplumber often drops."""
     text = " ".join(page_text.split())
-    first_label = next((row[0].strip() for row in rows if row and row[0] and row[0].strip()), "")
-    position = text.find(first_label) if first_label else -1
+    first = next((row for row in rows if row and row[0] and row[0].strip()), None)
+    if first is None:
+        return ""
+    label = first[0].strip()
+    value = next((_clean_value(cell) for cell in first[1:] if _is_value(cell)), "")
+    # The label followed by its first value: a label can appear earlier on the
+    # page under another section ("Products" under net sales and cost of sales).
+    anchored = re.search(re.escape(label) + r"\W{0,8}" + re.escape(value), text) if value else None
+    position = anchored.start() if anchored else text.find(label)
     return text[:position].strip() if position > 0 else ""
 
 
@@ -200,14 +226,22 @@ def _column_labels(header_row: list[str], value_columns: list[int], preamble: st
     partial one is usually a fragment of a sentence ("ne 30, 2026.") and
     would put a wrong period on a value, which is worse than none. Columns
     left without a header are labelled by position by the caller."""
-    dates = [" ".join(m.group(0).split()) for m in _POINT_IN_TIME.finditer(preamble)]
+    # Column headings sit right above the table; text further up (a title, a
+    # paragraph mentioning "as of" dates) isn't a heading.
+    heading_text = preamble[-HEADING_WINDOW_CHARS:]
+    dates = [" ".join(m.group(0).split()) for m in _POINT_IN_TIME.finditer(heading_text)]
     if value_columns and len(dates) == len(value_columns):
         return dict(zip(value_columns, dates))
 
-    years_runs = [re.findall(r"(?:19|20)\d{2}", m.group(0)) for m in _YEAR_RUN.finditer(preamble)]
+    years_runs = [re.findall(r"(?:19|20)\d{2}", m.group(0)) for m in _YEAR_RUN.finditer(heading_text)]
     years = next((run for run in reversed(years_runs) if len(run) == len(value_columns)), None)
+    full_dates = [" ".join(m.group(0).split()) for m in _FULL_DATE.finditer(heading_text)]
     if years:
         labels = dict(zip(value_columns, years))
+    elif value_columns and len(full_dates) >= len(value_columns):
+        # "Three Months Ended  Nine Months Ended / June 27, 2026  June 28, 2025 ...";
+        # the last ones, as a title can mention dates too ("Al 31 de diciembre de 2025 y 2024").
+        labels = dict(zip(value_columns, full_dates[-len(value_columns):]))
     else:
         headers = [h.strip() if h else "" for h in header_row]
         labels = {}
@@ -225,11 +259,20 @@ def _column_labels(header_row: list[str], value_columns: list[int], preamble: st
         if any(dated) and not all(dated):
             return {}
 
-    groups = [" ".join(m.group(0).split()) for m in _PERIOD_GROUP.finditer(preamble)]
-    if value_columns and all(labels.values()) and groups and len(value_columns) % len(groups) == 0:
+    found_groups = [(" ".join(m.group(1).split()), " ".join((m.group(2) or "").split()))
+                    for m in _PERIOD_GROUP.finditer(heading_text)]
+    # The groups right above the columns: the last k that split them evenly.
+    groups = next(
+        (found_groups[-k:] for k in range(len(found_groups), 0, -1) if value_columns and len(value_columns) % k == 0),
+        [],
+    )
+    if value_columns and all(labels.values()) and groups:
         size = len(value_columns) // len(groups)
         for index, column in enumerate(value_columns):
-            labels[column] = f"{groups[index // size]} {labels[column]}"
+            name, day = groups[index // size]
+            # A column already labelled with a full date doesn't need the group's own date.
+            prefix = name if _FULL_DATE.search(labels[column]) or not day else f"{name} {day}"
+            labels[column] = f"{prefix} {labels[column]}"
     return labels
 
 
@@ -244,10 +287,13 @@ _GROUPED_NUMBER = re.compile(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?")
 _YEAR_CELL = re.compile(r"(?:19|20)\d{2}")
 
 
-def _merge_split_numbers(row: list[str]) -> list[str]:
+def _merge_split_numbers(row: list[str], page_text: str = "") -> list[str]:
     """pdfplumber sometimes splits a figure across two cells ("5" | "4,190"
     for 54,190). Join a 1-2 digit fragment with the grouped number right
-    after it when the result is still a well-formed grouped number."""
+    after it when the result is still a well-formed grouped number and, when
+    the page text is known, the joined figure is printed on the page: a note
+    reference next to a figure ("4" | "58,240", printed "4 58,240") must stay
+    apart."""
     row = [cell or "" for cell in row]
     # Right to left, so a figure in three pieces ("1" | "8" | "7,103") chains up.
     for i in range(len(row) - 2, -1, -1):
@@ -257,8 +303,11 @@ def _merge_split_numbers(row: list[str]) -> list[str]:
         # The rest of the figure is in the next cell, or the one after an empty cell.
         j = next((k for k in range(i + 1, min(i + 3, len(row))) if row[k].strip()), None)
         tail = row[j].strip() if j is not None else ""
-        if _GROUPED_NUMBER.fullmatch(tail) and _GROUPED_NUMBER.fullmatch(head + tail):
-            row[i], row[j] = "", head + tail
+        joined = head + tail
+        if _GROUPED_NUMBER.fullmatch(tail) and _GROUPED_NUMBER.fullmatch(joined) and (
+            not page_text or joined in page_text
+        ):
+            row[i], row[j] = "", joined
     return row
 
 
@@ -272,9 +321,34 @@ def _year_header_index(rows: list[list[str]]) -> int | None:
     return None
 
 
+def _without_note_column(
+    rows: list[list[str]], header_row: list[str], value_columns: list[int], preamble: str
+) -> list[int]:
+    """Drop the column of note references (IFRS statements' "Nota" column:
+    5, 6, 12…): small whole numbers next to the figures, under a "Nota" /
+    "Note" heading. They're cross-references, not amounts."""
+    if len(value_columns) < 2:
+        return value_columns
+    headings = " ".join(cell or "" for cell in header_row) + " " + preamble[-HEADING_WINDOW_CHARS:]
+    if not _NOTE_HEADING.search(headings):
+        return value_columns
+    first = value_columns[0]
+    cells = [_clean_value(row[first]) for row in rows if first < len(row) and _is_value(row[first])]
+    if cells and all(re.fullmatch(r"\d{1,2}(?:\.\d{1,2})?", cell) for cell in cells):
+        return value_columns[1:]
+    return value_columns
+
+
 def _table_row_chunks(table: ParsedPdfTable, page_text: str = "") -> list[Chunk]:
-    rows = [_merge_split_numbers(row) for row in table.rows]
+    printed = " ".join(page_text.split())
+    rows = [_merge_split_numbers(row, printed) for row in table.rows]
     header_row = table.headers
+    if header_row and header_row[0] and any(
+        _is_value(cell) and not _YEAR_CELL.fullmatch((cell or "").strip()) for cell in header_row[1:]
+    ):
+        # pdfplumber took a data row ("Products | 47,153 | 43,620") as the header.
+        rows = [_merge_split_numbers(header_row, printed), *rows]
+        header_row = []
     year_header = _year_header_index(rows)
     if year_header is not None:
         # Rows above it are page text pdfplumber swept into the table (already
@@ -291,10 +365,15 @@ def _table_row_chunks(table: ParsedPdfTable, page_text: str = "") -> list[Chunk]
     busiest = max(counts.values(), default=0)
     value_columns = [c for c, n in counts.items() if n and n >= max(1, 0.3 * busiest)]
     preamble = _table_preamble(rows, page_text)
+    value_columns = _without_note_column(rows, header_row, value_columns, preamble)
     labels = _column_labels(header_row, value_columns, preamble)
     context = _context(preamble)
     where = f"Financial table page {table.page_number}" + (f" ({context})" if context else "")
 
+    # A heading right before the table ("... Cost of sales:") opens its first section.
+    # Letters only (no parentheses or digits), so a title like "(in USD thousands)" isn't swept in.
+    opening = re.search(r"([A-Za-zÁÉÍÓÚáéíóúÑñ][A-Za-zÁÉÍÓÚáéíóúÑñ ,&'/-]{1,60}):\s*$", preamble)
+    section = opening.group(1).strip() if opening else None
     chunks: list[Chunk] = []
     for row in rows:
         # Text in other columns is the rest of a wrapped label, not a value.
@@ -306,6 +385,14 @@ def _table_row_chunks(table: ParsedPdfTable, page_text: str = "") -> list[Chunk]
             for position, column in enumerate(value_columns, start=1)
             if column < len(row) and _is_value(row[column])
         ]
+        # Section headings ("Cost of sales:") name the rows under them: a bare
+        # "Products" row is cost of sales, not net sales.
+        if not values and label.endswith(":"):
+            section = label.rstrip(":").strip()
+        elif section and values and not label.lower().startswith("total"):
+            label = f"{section}: {label}"
+        elif label.lower().startswith("total"):
+            section = None
         text = f"{where}, row '{label}': " + "; ".join(values)
         chunks.append(
             Chunk(None, None, text, table.page_number, "table_row", table.table_index)

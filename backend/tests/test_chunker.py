@@ -209,3 +209,30 @@ def test_partial_or_mixed_headers_are_not_used():
 
     assert p.endswith("row 'EPS': column 1=2.31; column 2=9.11")
     assert m.endswith("row 'Revenues': column 1=96,428; column 2=24; column 3=23")
+
+
+def test_stacked_period_groups_with_full_dates_label_each_column():
+    # Apple's 10-Q: pdfplumber took the first data row (cost of sales,
+    # "Products") as the header; "Products" also appears under net sales.
+    page = ("CONDENSED CONSOLIDATED STATEMENTS OF OPERATIONS (In millions) Three Months Ended Nine Months Ended "
+            "June 27, 2026 June 28, 2025 June 27, 2026 June 28, 2025 Net sales: Products $ 78,678 $ 66,613 "
+            "Total net sales 109,417 94,036 Cost of sales: Products 47,153 43,620 163,810 147,097")
+    table = _pdf_table(["Products", "", "47,153", "", "43,620", "", "163,810", "", "147,097"], [
+        ["Total cost of sales", "", "54,647", "", "50,318", "", "185,575", "", "166,835"],
+        ["Net income", "$", "29,789", "$", "23,434", "$", "101,464", "$", "84,544"],
+    ], page=4)
+
+    texts = [c.text for c in _table_row_chunks(table, page)]
+
+    assert len(texts) == 3  # the header row was data and is kept
+    assert "row 'Cost of sales: Products': Three Months Ended June 27, 2026=47,153" in texts[0]
+    assert ("row 'Net income': Three Months Ended June 27, 2026=29,789; Three Months Ended June 28, 2025=23,434; "
+            "Nine Months Ended June 27, 2026=101,464; Nine Months Ended June 28, 2025=84,544") in texts[2]
+
+
+def test_a_header_row_of_years_is_still_a_header():
+    table = _pdf_table(["Line item", "2024", "2023"], [["Revenue", "1,250", "1,100"]])
+
+    [row] = [c.text for c in _table_row_chunks(table, "")]
+
+    assert row.endswith("row 'Revenue': 2024=1,250; 2023=1,100")
