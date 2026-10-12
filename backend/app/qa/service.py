@@ -3,7 +3,13 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from app.db.models import Document
-from app.qa.conversation import get_or_create_session, get_recent_history, record_turn
+from app.qa.conversation import (
+    get_or_create_session,
+    get_recent_history,
+    record_turn,
+    resolve_clarification_reply,
+)
+from app.qa.formula_context import add_formula_precedents, explain_formulas
 from app.qa.graph import get_qa_graph
 from app.qa.schemas import GroundedAnswer, GroundedStatement, VersionUsed
 from app.retrieval.service import retrieve, restricted_match_exists
@@ -32,11 +38,15 @@ def answer_question(
     """
     session = get_or_create_session(db, session_id)
     history = get_recent_history(db, session.id)
+    asked = question
+    question = resolve_clarification_reply(question, history)
 
     chunks = retrieve(
         db, question=question, top_k=top_k, user_roles=user_roles, user_id=user_id,
         document_id=document_id,
     )
+    # Rows a retrieved formula references, so "how is X calculated?" can be answered.
+    chunks = add_formula_precedents(db, chunks, question, user_roles=user_roles, user_id=user_id)
     restricted = restricted_match_exists(
         db, question=question, top_k=top_k, user_roles=user_roles, document_id=document_id
     )
@@ -52,10 +62,16 @@ def answer_question(
         "restriction_notice": restriction_notice,
     })
     answer = result["answer"]
+    # "How is X calculated?": spell out the formula from the workbook itself.
+    explanations = explain_formulas(db, question, answer.statements, answer.sources)
+    if explanations:
+        first_notice = next((i for i, s in enumerate(answer.statements) if s.notice), len(answer.statements))
+        answer.statements[first_notice:first_notice] = explanations
     answer.session_id = str(session.id)
     answer.versions_used = describe_versions_used(db, answer.statements)
 
-    record_turn(db, session.id, question, answer)
+    answer.question = asked
+    record_turn(db, session.id, asked, answer)
     return answer
 
 

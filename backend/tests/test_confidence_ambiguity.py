@@ -352,3 +352,79 @@ def test_model_topic_wins_over_keywords_unless_generic():
     assert resolve_topic("tax", "revenue recognition question") == "tax"
     assert resolve_topic("general", "revenue recognition question") == "revenue_recognition"
     assert resolve_topic("not-a-topic", "payroll costs") == "compensation"
+
+
+# --- scale only when the source states it -----------------------------------------------
+
+def _scaled(statement_text, source_text):
+    from app.qa.confidence import unverified_figures
+    from app.qa.schemas import GroundedStatement, ResolvedCitation
+
+    citation = ResolvedCitation("S1", "d", "f.xlsx", "Summary", "A5:B5", None, None, source_text)
+    return unverified_figures(GroundedStatement(text=statement_text, citations=[citation]))
+
+
+def test_figure_scaled_up_without_a_stated_scale_is_rejected():
+    # The source says 1205 (USD); "1,205,000" is not in it.
+    assert _scaled("Revenue for 2024 is 1,205,000 USD.",
+                   "Sheet 'Summary' (Cifras en dólares (USD)), Revenue: 2024=1205") == ["1,205,000"]
+
+
+def test_figure_in_full_is_accepted_when_the_source_states_thousands():
+    assert _scaled("Revenue for 2024 is 4,820,000 COP.",
+                   "Sheet 'EERR' (Cifras en miles de pesos), Ingresos: 2024=4820") == []
+    assert _scaled("Revenue was 4,820,000,000.",
+                   "Revenue (in millions): 4,820") == []
+
+
+def test_stated_scale_word_in_the_answer_still_works():
+    assert _scaled("Revenue was 3.4 million.", "Revenue: 3,401,234") == []
+
+
+# --- clarification from the per-source triage entries ----------------------------------
+
+def _triage(**kwargs):
+    from app.qa.schemas import LLMTriage
+    return LLMTriage(metric_in_sources=True, **kwargs)
+
+
+def test_entities_and_periods_listed_per_source_trigger_clarification():
+    from app.qa.schemas import LLMMetricSource
+
+    # The summary lists miss Pacífico and 2025; the per-source entries don't.
+    triage = _triage(
+        entities_with_metric=["Andina S.A.S."], periods_with_metric=["2024"],
+        metric_sources=[
+            LLMMetricSource(source_id="S3", entity="Andina S.A.S.", period="2024"),
+            LLMMetricSource(source_id="S6", entity="Andina", period="2025"),
+            LLMMetricSource(source_id="S7", entity="Pacífico S.A.", period="2024"),
+        ],
+    )
+
+    question, options = clarification_for(triage)
+
+    assert question == "Which entity and period do you mean?"
+    # Only the pairs the sources have: there's no Pacífico 2025 figure.
+    assert options == ["Andina S.A.S. – 2024", "Andina S.A.S. – 2025", "Pacífico S.A. – 2024"]
+
+
+def test_legal_form_variants_are_one_entity():
+    from app.qa.schemas import LLMMetricSource
+
+    triage = _triage(
+        question_specifies_period=True,
+        metric_sources=[LLMMetricSource(source_id="S1", entity="Andina", period="2024"),
+                        LLMMetricSource(source_id="S2", entity="ANDINA S.A.S", period="2024")],
+    )
+
+    assert clarification_for(triage) is None
+
+
+def test_reply_to_a_clarification_is_combined_with_the_original_question():
+    from app.qa.conversation import resolve_clarification_reply
+
+    history = [("What was revenue?", "(asked for clarification) Which entity and period do you mean?")]
+    assert resolve_clarification_reply("Andina S.A.S. – 2024", history) == "What was revenue? (Andina S.A.S. – 2024)"
+    answered = [("What was revenue?", "Revenue for 2024 is 4,820,000 COP.")]
+    assert resolve_clarification_reply("¿Y en 2025?", answered) == "¿Y en 2025?"
+    assert resolve_clarification_reply("What was revenue?", []) == "What was revenue?"

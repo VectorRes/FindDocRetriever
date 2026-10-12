@@ -39,11 +39,26 @@ def get_recent_history(db: Session, session_id: UUID, limit: int = HISTORY_LIMIT
     return [(m.question, m.answer_text) for m in reversed(messages)]
 
 
+CLARIFICATION_MARKER = "(asked for clarification)"
+
+
+def resolve_clarification_reply(question: str, history: list[tuple[str, str]]) -> str:
+    """When the previous turn asked which entity/period was meant, the reply
+    ("Andina S.A.S. – 2024") is only half a question: combine it with the
+    question it answers, so retrieval looks for that figure again rather than
+    for anything about Andina in 2024."""
+    if history:
+        previous_question, previous_answer = history[-1]
+        if previous_answer.startswith(CLARIFICATION_MARKER):
+            return f"{previous_question} ({question})"
+    return question
+
+
 def record_turn(db: Session, session_id: UUID, question: str, answer: GroundedAnswer) -> None:
     if answer.needs_clarification:
         # Recorded so the analyst's reply ("Subsidiary A, 2024") is read as an
         # answer to this clarification on the next turn (ID-HU-BE-009).
-        answer_text = f"(asked for clarification) {answer.clarification_question}"
+        answer_text = f"{CLARIFICATION_MARKER} {answer.clarification_question}"
     else:
         answer_text = (
             " ".join(statement.text for statement in answer.statements)

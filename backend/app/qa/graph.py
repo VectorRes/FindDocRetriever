@@ -21,12 +21,15 @@ ID-HU-BE-009 adds:
     answer.
 """
 import logging
+import re
 from typing import TypedDict
 
 from langgraph.graph import END, StateGraph
 
+from app.config import get_settings
 from app.escalation import EscalationSuggestion, resolve_topic, suggest_escalation
-from app.qa.confidence import assess_confidence, unverified_figures
+from app.figures.extraction import single_currency
+from app.qa.confidence import _figures, _is_material, assess_confidence, unverified_figures
 from app.qa.llm import get_chat_model
 from app.qa.prompts import (
     SYSTEM_PROMPT,
@@ -87,12 +90,27 @@ def triage_node(state: QAState) -> QAState:
 MAX_CLARIFICATION_OPTIONS = 6
 
 
-def _distinct(values: list[str]) -> list[str]:
+# Legal-form suffixes ignored when telling entities apart ("Andina" = "Andina S.A.S.").
+_LEGAL_FORM = re.compile(
+    r"\b(s\.?\s?a\.?\s?s|s\.?\s?a|ltda|inc|ltd|llc|corp|corporation|company|co|plc|gmbh|s\.?\s?a\.?\s?de\s?c\.?\s?v)\b\.?",
+    re.IGNORECASE,
+)
+
+
+def _entity_key(value: str) -> str:
+    return " ".join(re.sub(r"[^\w\s]", " ", _LEGAL_FORM.sub(" ", value.lower())).split())
+
+
+def _distinct(values: list[str], key=lambda v: " ".join(v.lower().split())) -> list[str]:
+    """Distinct values, keeping the first spelling of each (the longest when
+    one is a fuller form of another, e.g. "Andina S.A.S." over "Andina")."""
     seen: dict[str, str] = {}
     for value in values:
-        key = " ".join(value.lower().split())
-        if key and key not in seen:
-            seen[key] = value.strip()
+        if not value or not value.strip():
+            continue
+        k = key(value)
+        if k and (k not in seen or len(value.strip()) > len(seen[k])):
+            seen[k] = value.strip()
     return list(seen.values())
 
 
@@ -106,14 +124,24 @@ def clarification_for(triage: LLMTriage) -> tuple[str, list[str]] | None:
     and the options to offer, or None."""
     if not triage.metric_in_sources:
         return None
-    entities = _distinct(triage.entities_with_metric)
-    periods = _distinct(triage.periods_with_metric)
+    by_source = triage.metric_sources
+    entities = _distinct(
+        triage.entities_with_metric + [m.entity for m in by_source if m.entity], key=_entity_key
+    )
+    periods = _distinct(triage.periods_with_metric + [m.period for m in by_source if m.period])
     missing_entity = len(entities) > 1 and not triage.question_specifies_entity
     missing_period = len(periods) > 1 and not triage.question_specifies_period
 
     if missing_entity and missing_period:
         question = "Which entity and period do you mean?"
-        options = [f"{entity} – {period}" for entity in entities for period in periods]
+        # Only the combinations the sources actually have (no "Pacífico – 2025"
+        # when there's no such figure); every pairing when that isn't known.
+        canonical = {_entity_key(e): e for e in entities}
+        observed = _distinct([
+            f"{canonical.get(_entity_key(m.entity), m.entity)} – {m.period}"
+            for m in by_source if m.entity and m.period
+        ])
+        options = observed or [f"{entity} – {period}" for entity in entities for period in periods]
     elif missing_entity:
         question = "Which entity do you mean?"
         options = entities
@@ -185,6 +213,97 @@ def _resolve_citation(source_id: str, source_map: dict[str, RetrievedChunk]) -> 
     )
 
 
+_PLANNED = re.compile(
+    r"presupuest|budget|forecast|proyecci|projection|projected|pron[oó]stico", re.IGNORECASE
+)
+
+
+def _figure_kind(statement: GroundedStatement) -> str:
+    """"planned" if it cites a budget/forecast source, else "actual"."""
+    for citation in statement.citations:
+        where = " ".join(filter(None, [citation.document_filename, citation.sheet_name, citation.text]))
+        if _PLANNED.search(where):
+            return "planned"
+    return "actual"
+
+
+def _statement_currency(statement: GroundedStatement) -> str | None:
+    """The currency a statement's figure is in: as it says, else as its sources
+    state. Amounts in different currencies (1,205 USD vs 4,820,000 COP) are
+    not conflicting values of one fact."""
+    return single_currency(statement.text) or single_currency(
+        " ".join(c.text for c in statement.citations)
+    )
+
+
+def settle_conflicts(statements: list[GroundedStatement]) -> None:
+    """Keep the model's "conflicting" flag only where it holds up: a conflict
+    takes at least two statements of the same kind of figure. A budgeted
+    figure differing from the actual one is expected, not a disagreement
+    between sources, and a lone "conflicting" statement has nothing to
+    conflict with."""
+    flagged: dict[tuple, list[GroundedStatement]] = {}
+    for statement in statements:
+        if statement.conflicting:
+            key = (_figure_kind(statement), _statement_currency(statement))
+            flagged.setdefault(key, []).append(statement)
+    for group in flagged.values():
+        if len(group) < 2:
+            for statement in group:
+                statement.conflicting = False
+
+
+def _statement_figures(statement: GroundedStatement) -> frozenset[float]:
+    return frozenset(
+        max(values) for token, values in _figures(statement.text) if _is_material(token) and values
+    )
+
+
+def detect_conflicts(statements: list[GroundedStatement], triage: LLMTriage, source_map: dict) -> None:
+    """Flag disagreements the model didn't mark, using triage's per-source
+    facts: statements citing the requested figure for the same entity,
+    period and kind of figure (actual vs planned) that state different
+    amounts are conflicting values of one fact."""
+    facts = {
+        m.source_id: (_entity_key(m.entity), " ".join(m.period.lower().split()))
+        for m in triage.metric_sources if m.entity and m.period
+    }
+    groups: dict[tuple, list[GroundedStatement]] = {}
+    for statement in statements:
+        keys = {facts[c.source_id] for c in statement.citations if c.source_id in facts}
+        figures = _statement_figures(statement)
+        if len(keys) != 1 or not figures:
+            continue
+        key = (*keys.pop(), _figure_kind(statement), _statement_currency(statement))
+        groups.setdefault(key, []).append(statement)
+    for group in groups.values():
+        amounts = {_statement_figures(s) for s in group}
+        if len(amounts) > 1 and not _all_close(amounts):
+            for statement in group:
+                statement.conflicting = True
+
+
+def _all_close(amounts: set[frozenset[float]]) -> bool:
+    """Same amount up to rounding, with the reconciliation tolerance (0.1%)
+    rather than figure verification's looser one: 4,795,000 vs 4,820,000
+    (0.5%) is a real disagreement."""
+    tolerance = get_settings().comparison_tolerance
+    values = [max(a) for a in amounts]
+    return all(abs(v - values[0]) <= tolerance * max(abs(values[0]), 1.0) for v in values)
+
+
+_SOURCE_IDS = re.compile(r"\s*\[?\((?:S\d+(?:,\s*)?)+\)\]?|\s*\[(?:S\d+(?:,\s*)?)+\]")
+_TRAILING_DEBRIS = re.compile(r"[\s\[\]{},]+$")
+
+
+def clean_statement_text(text: str) -> str:
+    """Drop source ids and structured-output debris the model sometimes
+    leaves in a statement ("... 4,820,000 COP (S2).},{"); citations are
+    shown separately."""
+    cleaned = _TRAILING_DEBRIS.sub("", _SOURCE_IDS.sub("", text)).strip()
+    return cleaned or text
+
+
 def ground_and_validate_node(state: QAState) -> QAState:
     raw = state.get("raw_answer") or LLMGroundedAnswer(statements=[], unsupported=True)
     source_map = state.get("source_map", {})
@@ -205,13 +324,17 @@ def ground_and_validate_node(state: QAState) -> QAState:
         ]
         if not resolved:
             continue
-        statement = GroundedStatement(text=stmt.text, citations=resolved, conflicting=stmt.conflicting)
+        statement = GroundedStatement(
+            text=clean_statement_text(stmt.text), citations=resolved, conflicting=stmt.conflicting
+        )
         # ID-HU-BE-009: ...and every figure it states must appear in those sources.
         missing = unverified_figures(statement)
         if missing:
             removed_figures.extend(missing)
             continue
         statements.append(statement)
+    settle_conflicts(statements)
+    detect_conflicts(statements, triage, source_map)
 
     answered = bool(statements) and not raw.unsupported
     topic = resolve_topic(triage.topic, state["question"])
@@ -230,8 +353,14 @@ def ground_and_validate_node(state: QAState) -> QAState:
             self_confidence=raw.self_confidence,
             cited_scores=cited_scores,
             requires_judgment=triage.requires_judgment,
+            has_conflicts=any(s.conflicting for s in statements),
         )
-        if confidence.level == "low":
+        if any(s.conflicting for s in statements):
+            # Same as an unreconciled comparison (ID-HU-FE-003): consolidation owns it.
+            escalation = suggest_escalation(
+                "consolidation", "The sources report different values for the same figure."
+            )
+        elif confidence.level == "low":
             escalation = suggest_escalation(topic, "The system's confidence in this answer is low.")
     else:
         # No answer at all: point the analyst at the team that owns the topic.

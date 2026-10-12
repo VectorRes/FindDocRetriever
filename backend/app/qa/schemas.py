@@ -46,7 +46,8 @@ class LLMStatement(BaseModel):
             "Set to true only when this statement exists specifically to present one "
             "side of a disagreement between sources over the same fact — e.g. two "
             "documents reporting different values for the same period/metric. Each "
-            "conflicting value gets its own statement citing only its own source(s)."
+            "conflicting value gets its own statement citing only its own source(s). "
+            "Never true for figures of different kinds, such as a budget vs an actual."
         ),
     )
 
@@ -77,6 +78,18 @@ class LLMGroundedAnswer(BaseModel):
     )
 
 
+class LLMMetricSource(BaseModel):
+    """One source that gives the requested figure, and for whom/when."""
+
+    source_id: str = Field(description="The bracket id of the source, e.g. 'S3'.")
+    entity: str | None = Field(
+        default=None, description="The company the figure is for, from the source's title or file name."
+    )
+    period: str | None = Field(
+        default=None, description="The period the figure is for, from its column header or the title, e.g. '2024'."
+    )
+
+
 class LLMTriage(BaseModel):
     """ID-HU-BE-009: a short, focused pre-check run before answer generation.
 
@@ -89,6 +102,15 @@ class LLMTriage(BaseModel):
     metric_in_sources: bool = Field(
         default=False,
         description="True if the SOURCES contain the figure or fact the QUESTION asks for.",
+    )
+    # Filled source by source, which models do far more reliably than a
+    # summary list; clarification_for() derives entities/periods from it.
+    metric_sources: list[LLMMetricSource] = Field(
+        default_factory=list,
+        description=(
+            "Go through the SOURCES one by one and add an entry for EVERY source that gives "
+            "the requested figure, with its entity and period. Leave out sources that don't."
+        ),
     )
     entities_with_metric: list[str] = Field(
         default_factory=list,

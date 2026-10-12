@@ -76,13 +76,29 @@ def _is_material(token: str) -> bool:
     return True
 
 
-def _matches(stated: set[float], source_values: set[float]) -> bool:
+# Wording a source must contain before its figures may be read as thousands /
+# millions: without it, "1205" stated as "1,205,000" is a made-up figure.
+_THOUSANDS = re.compile(r"\b(thousands?|miles|in 000s?|000s)\b|\(000\)", re.IGNORECASE)
+_MILLIONS = re.compile(r"\b(millions?|millones|mill[oó]n|mm|mill\.)", re.IGNORECASE)
+
+
+def documented_scales(text: str) -> tuple[float, ...]:
+    """Scale factors a source's text says its figures are expressed in."""
+    factors = []
+    if _THOUSANDS.search(text):
+        factors.append(1e3)
+    if _MILLIONS.search(text):
+        factors.append(1e6)
+    return tuple(factors)
+
+
+def _matches(stated: set[float], source_values: set[float], factors: tuple[float, ...] = ()) -> bool:
     for s in stated:
         for v in source_values:
             if v == s or (v != 0 and abs(s - v) / abs(v) <= FIGURE_TOLERANCE):
                 return True
-            # A source in thousands/millions ("in thousands of COP") stated in full, or vice versa.
-            for factor in (1e3, 1e6):
+            # A source "in thousands of COP" stated in full — only when it says so.
+            for factor in factors:
                 if v != 0 and abs(s - v * factor) / abs(v * factor) <= FIGURE_TOLERANCE:
                     return True
     return False
@@ -129,13 +145,15 @@ def match_figure(value_text: str, source_text: str) -> float | None:
 def unverified_figures(statement: GroundedStatement) -> list[str]:
     """Figures in `statement` that don't appear in any source it cites."""
     source_values: set[float] = set()
+    factors: set[float] = set()
     for citation in statement.citations:
         for _, values in _figures(citation.text):
             source_values |= values
+        factors.update(documented_scales(citation.text))
 
     missing = []
     for token, values in _figures(statement.text):
-        if _is_material(token) and not _matches(values, source_values):
+        if _is_material(token) and not _matches(values, source_values, tuple(sorted(factors))):
             missing.append(token)
     return missing
 
@@ -147,12 +165,18 @@ def assess_confidence(
     self_confidence: str,
     cited_scores: list[float],
     requires_judgment: bool = False,
+    has_conflicts: bool = False,
 ) -> ConfidenceOut:
     """Score an answer where `kept_count` of the model's `proposed_count`
     statements survived grounding. `removed_figures` are the figures whose
     statements were dropped because the figure wasn't in their sources."""
     score = 1.0
     reasons: list[str] = []
+
+    if has_conflicts:
+        # Several values for one fact: none of them can be given as *the* answer.
+        score -= 0.45
+        reasons.append("The sources disagree on this figure; it needs to be reconciled")
 
     dropped = max(proposed_count - kept_count, 0)
     if proposed_count and dropped:

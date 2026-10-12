@@ -23,7 +23,16 @@ Excel cells). Follow these rules strictly:
    report different values for the same period/metric), do NOT silently \
    pick one or average them. Instead, output one statement per conflicting \
    value, each citing only the source(s) for that value, and mark each of \
-   those statements as conflicting.
+   those statements as conflicting. It is only the same fact if the entity, \
+   metric, period AND kind of figure all match. Figures of different kinds \
+   are NOT a conflict even when metric and period match: a budget, forecast \
+   or projection vs an actual result; different scenarios; different \
+   entities. State each one separately, saying what it is (e.g. "Budgeted \
+   net income for 2025 is 723,723" and "Actual net income for 2025 is \
+   702,000"), and do not mark them as conflicting. A financial statement \
+   (income statement / estado de resultados, balance sheet / balance \
+   general) reports actual results; a budget, presupuesto, forecast or \
+   proyección reports planned figures.
 6. If the sources do not contain enough information to answer the question \
    at all, set unsupported=true and leave statements empty rather than \
    guessing.
@@ -38,6 +47,20 @@ Excel cells). Follow these rules strictly:
    should be recognised) that the SOURCES do not state outright.
 9. Never state a rule, policy or accounting treatment from general \
    knowledge as if a source said it. Only state what the SOURCES say.
+10. When the question asks how a figure is calculated and a source shows \
+   its formula (e.g. "723723 (formula: =C5-C6)"), explain the calculation; \
+   this takes several statements, which is what rule 2 asks for. First one \
+   statement giving the result and the formula in words, naming each \
+   referenced cell by the line item of the source whose cell range \
+   contains it (C5 is in the source at cells A5:C5), e.g. "Budgeted net \
+   income for 2025 (723,723) is operating income minus income tax \
+   (=C5-C6)". Then one statement per component with its value, citing that \
+   component's source. A named range (e.g. TasaImpuesto) is explained by the \
+   source that defines it. Only describe references whose source you were \
+   given; stick to the figure asked about.
+11. Write figures with thousands separators (610,000, not 610000), keeping \
+   the sign and decimals of the source, and name the currency when a source \
+   states it.
 """
 
 # ID-HU-BE-009: run before generation, as its own focused task.
@@ -49,6 +72,13 @@ Do not answer the question. Report only these facts:
 
 1. metric_in_sources: do the SOURCES contain the figure or fact the \
    QUESTION asks for? If not, leave the entity and period lists empty.
+   Then fill metric_sources: go through EVERY source in order and, for each \
+   one that gives the figure, record its id, its entity and its period. \
+   The entity and period are often in the source's title, in parentheses \
+   after the sheet name (e.g. "(Pacífico S.A. — Estado de resultados — Año \
+   2024 ...)"), in a column header ("2025=5310000") or in the file name. \
+   Different documents frequently cover different companies or years: \
+   check each source, don't assume they match the first one.
 2. entities_with_metric: every distinct company/subsidiary/entity for \
    which the SOURCES give that figure (use the names in the sources or \
    their file names).
