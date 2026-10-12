@@ -12,7 +12,8 @@ from app.qa.conversation import (
 from app.qa.formula_context import add_formula_precedents, explain_formulas
 from app.qa.graph import get_qa_graph
 from app.qa.schemas import GroundedAnswer, GroundedStatement, VersionUsed
-from app.qa.query_expansion import retrieve_for_question
+from app.qa.query_expansion import retrieve_with_translation
+from app.qa.statement_rows import statement_rows
 from app.retrieval.service import restricted_match_exists
 from app.versioning import current_version_of
 
@@ -43,10 +44,15 @@ def answer_question(
     question = resolve_clarification_reply(question, history)
 
     # Bilingual and spread across documents (see app/qa/query_expansion.py).
-    chunks = retrieve_for_question(
+    chunks, translated = retrieve_with_translation(
         db, question=question, top_k=top_k, user_roles=user_roles, user_id=user_id,
         document_id=document_id,
     )
+    # The statements' own rows for what's asked, ahead of passages that only
+    # mention it (see app/qa/statement_rows.py).
+    found = statement_rows(db, [question, translated], chunks, user_roles, user_id)
+    listed = {row.chunk_id for row in found.rows}
+    chunks = found.rows + [chunk for chunk in chunks if chunk.chunk_id not in listed]
     # Rows a retrieved formula references, so "how is X calculated?" can be answered.
     chunks = add_formula_precedents(db, chunks, question, user_roles=user_roles, user_id=user_id)
     restricted = restricted_match_exists(
@@ -62,6 +68,7 @@ def answer_question(
         "chunks": chunks,
         "history": history,
         "restriction_notice": restriction_notice,
+        "statement_rows": [row for row in found.rows if row.chunk_id in found.full_match_ids],
     })
     answer = result["answer"]
     # "How is X calculated?": spell out the formula from the workbook itself.

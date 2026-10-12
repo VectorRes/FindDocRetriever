@@ -154,18 +154,51 @@ def match_figure(value_text: str, source_text: str) -> float | None:
     return value if _matches({value}, source_values) else None
 
 
+_PERCENT_AFTER = re.compile(r"\s*(%|percent\b|por ciento\b|pct\b)", re.IGNORECASE)
+_AMOUNT_BEFORE = re.compile(r"(US\$|\$|€|£|¥|\bCOP|\bUSD|\bEUR)\s*\(?-?$", re.IGNORECASE)
+
+
+def _typed_figures(text: str) -> list[tuple[str, set[float], bool, bool]]:
+    """Every number with its readings, whether it's a percentage, and whether
+    it's plainly an amount (a currency sign before it, or a scale word after
+    it: "$20", "20 million")."""
+    text = join_split_groups(text)
+    typed = []
+    for (token, values), match in zip(_figures(text), _NUMBER.finditer(text)):
+        after = text[match.end():match.end() + 14]
+        percent = bool(_PERCENT_AFTER.match(after))
+        scale_word = re.match(r"\s*([a-záéíóú]+)", after.lower())
+        amount = bool(_AMOUNT_BEFORE.search(text[max(0, match.start() - 6):match.start()])) or bool(
+            scale_word and scale_word.group(1) in _SCALE_WORDS
+        )
+        typed.append((token, values, percent, amount))
+    return typed
+
+
 def unverified_figures(statement: GroundedStatement) -> list[str]:
-    """Figures in `statement` that don't appear in any source it cites."""
-    source_values: set[float] = set()
+    """Figures in `statement` that don't appear in any source it cites. A
+    percentage must be a percentage in the source (or its decimal fraction,
+    0.41 for 41%), and an amount must not be one: "20% growth" in a source
+    doesn't support "revenue of 20 million"."""
+    plain: set[float] = set()        # no sign either way ("Margin 12.5", "610000")
+    amounts: set[float] = set()      # "$ 1,205", "3.4 million"
+    percents: set[float] = set()     # "45%"
     factors: set[float] = set()
     for citation in statement.citations:
-        for _, values in _figures(citation.text):
-            source_values |= values
+        for _, values, percent, amount in _typed_figures(citation.text):
+            (percents if percent else amounts if amount else plain).update(values)
         factors.update(documented_scales(citation.text))
 
     missing = []
-    for token, values in _figures(statement.text):
-        if _is_material(token) and not _matches(values, source_values, tuple(sorted(factors))):
+    for token, values, percent, amount in _typed_figures(statement.text):
+        if not (_is_material(token) or amount or percent):
+            continue
+        if percent:
+            supported = (_matches(values, percents | plain)
+                         or _matches(values, {v * 100 for v in plain | amounts if abs(v) <= 1}))
+        else:
+            supported = _matches(values, plain | amounts, tuple(sorted(factors)))
+        if not supported:
             missing.append(token)
     return missing
 

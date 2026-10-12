@@ -28,7 +28,7 @@ from langgraph.graph import END, StateGraph
 
 from app.config import get_settings
 from app.escalation import EscalationSuggestion, resolve_topic, suggest_escalation
-from app.figures.extraction import entity_key as _entity_key, period_key, single_currency
+from app.figures.extraction import entity_key as _entity_key, period_key, single_currency, source_row_label
 from app.qa.confidence import _figures, _is_material, assess_confidence, unverified_figures
 from app.qa.llm import get_chat_model
 from app.qa.prompts import (
@@ -39,6 +39,7 @@ from app.qa.prompts import (
     label_chunks,
 )
 from app.qa.schemas import (
+    ConfidenceOut,
     GroundedAnswer,
     GroundedStatement,
     LLMGroundedAnswer,
@@ -46,6 +47,8 @@ from app.qa.schemas import (
     LLMTriage,
     ResolvedCitation,
 )
+from app.qa.statement_rows import row_figures
+from app.ratios.mapping import normalize_label
 from app.retrieval.service import RetrievedChunk
 
 logger = logging.getLogger(__name__)
@@ -62,6 +65,9 @@ class QAState(TypedDict, total=False):
     triage_result: LLMTriage
     answer: GroundedAnswer
     restriction_notice: str | None
+    # Statement rows whose label is exactly what the question asks for
+    # (app/qa/statement_rows.py): an answer must agree with them.
+    statement_rows: list[RetrievedChunk]
 
 
 def triage_node(state: QAState) -> QAState:
@@ -302,9 +308,61 @@ def settle_conflicts(statements: list[GroundedStatement]) -> None:
             key = (_figure_kind(statement), _statement_currency(statement))
             flagged.setdefault(key, []).append(statement)
     for group in flagged.values():
-        if len(group) < 2:
+        # Values of different lines (a total and its parts, a segment and the
+        # consolidated figure) don't disagree.
+        disagree = any(same_line(a, b) for i, a in enumerate(group) for b in group[i + 1:])
+        if len(group) < 2 or not disagree:
             for statement in group:
                 statement.conflicting = False
+
+
+def _lines(statement: GroundedStatement) -> set[tuple]:
+    """(document, table title, line label) of each table row the statement
+    cites; text sources have no line and are left out."""
+    lines = set()
+    for c in statement.citations:
+        label = line_label(c.text)
+        if label:
+            title = c.text.split("row '", 1)[0] if "row '" in c.text else None
+            lines.add((c.document_id, title, label))
+    return lines
+
+
+def same_line(a: GroundedStatement, b: GroundedStatement) -> bool:
+    """Whether two statements report the same line item, so different
+    values are a real disagreement: the same label in two documents (BI
+    report vs income statement), or in the same table of one document; not
+    the same label in another table of the same document (a segment table's
+    "Operating income" vs the consolidated one). Unknown (text) counts as same."""
+    lines_a, lines_b = _lines(a), _lines(b)
+    if not lines_a or not lines_b:
+        return True
+    return any(
+        la == lb and (da != db or ta == tb)
+        for da, ta, la in lines_a for db, tb, lb in lines_b
+    )
+
+
+def statement_row_mismatch(statements: list[GroundedStatement], rows: list[RetrievedChunk]) -> str | None:
+    """Why the answer can't be trusted when a statement row named exactly
+    by the question (in a document the answer cites) gives none of the
+    answer's figures: the answer took the figure from somewhere else (a
+    note's "Total", another line), not from the line asked about."""
+    cited = {c.document_id for s in statements for c in s.citations}
+    rows = [row for row in rows if row.document_id in cited]
+    # Every reading of each figure: "60,801 million" is 60,801 as the table writes it.
+    given = {
+        value for s in statements for token, values in _figures(s.text) if _is_material(token) for value in values
+    }
+    if not rows or not given:
+        return None
+    for row in rows:
+        if any(abs(a - b) <= 0.005 * max(abs(a), abs(b)) for a in given for b in row_figures(row)):
+            return None
+    row = rows[0]
+    label = source_row_label(row.text) or "the line asked about"
+    where = f"{row.document_filename}, page {row.page_number}" if row.page_number else row.document_filename
+    return f"The statement line '{label}' ({where}) reports different figures than this answer; check it."
 
 
 def _statement_figures(statement: GroundedStatement) -> frozenset[float]:
@@ -336,6 +394,19 @@ def _statement_period(statement: GroundedStatement, triage_periods: set[str]) ->
     return period_key(next(iter(triage_periods)))
 
 
+_EXCEL_ROW = re.compile(r"^Sheet '[^']*'(?: \((?:[^()]|\([^()]*\))*\))?, (.+?): ")
+
+
+def line_label(source_text: str) -> str | None:
+    """The line item a table-row source holds (PDF "row 'Net income'", or an
+    Excel row "Sheet 'X' (…), Utilidad neta: …"), normalized; None for text."""
+    label = source_row_label(source_text)
+    if label is None:
+        match = _EXCEL_ROW.match(source_text)
+        label = match.group(1) if match else None
+    return normalize_label(label.rsplit(":", 1)[-1]) or None if label else None
+
+
 def detect_conflicts(statements: list[GroundedStatement], triage: LLMTriage, source_map: dict) -> None:
     """Flag disagreements the model didn't mark, using triage's per-source
     facts: statements citing the requested figure for the same entity,
@@ -353,10 +424,11 @@ def detect_conflicts(statements: list[GroundedStatement], triage: LLMTriage, sou
         key = (entities.pop(), period, _figure_kind(statement), _statement_currency(statement))
         groups.setdefault(key, []).append(statement)
     for group in groups.values():
-        amounts = {_statement_figures(s) for s in group}
-        if len(amounts) > 1 and not _all_close(amounts):
-            for statement in group:
-                statement.conflicting = True
+        for i, a in enumerate(group):
+            for b in group[i + 1:]:
+                # Only values of the same line disagree (see same_line).
+                if same_line(a, b) and not _all_close({_statement_figures(a), _statement_figures(b)}):
+                    a.conflicting = b.conflicting = True
 
 
 def _all_close(amounts: set[frozenset[float]]) -> bool:
@@ -437,7 +509,12 @@ def ground_and_validate_node(state: QAState) -> QAState:
             escalation = suggest_escalation(
                 "consolidation", "The sources report different values for the same figure."
             )
-        elif confidence.level == "low":
+        mismatch = statement_row_mismatch(statements, state.get("statement_rows") or [])
+        if mismatch:
+            confidence = ConfidenceOut(
+                level="low", score=min(confidence.score, 0.4), reasons=[*confidence.reasons, mismatch]
+            )
+        if escalation is None and confidence.level == "low":
             escalation = suggest_escalation(topic, "The system's confidence in this answer is low.")
     else:
         # No answer at all: point the analyst at the team that owns the topic.

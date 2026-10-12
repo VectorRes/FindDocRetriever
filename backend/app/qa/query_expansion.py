@@ -35,6 +35,22 @@ _SPANISH = re.compile(
     re.IGNORECASE,
 )
 
+_ENGLISH = re.compile(
+    r"\b(what|which|how|was|were|is|are|did|does|the|of|for|and|with|much|many|total|net|revenue|income|assets)\b",
+    re.IGNORECASE,
+)
+
+
+def is_spanish(question: str) -> bool:
+    """The question's language, from its words: a company name with an accent
+    ("Fundación") doesn't make an English question Spanish."""
+    spanish_words = len([m for m in _SPANISH.finditer(question) if m.group(1)])
+    english_words = len(_ENGLISH.findall(question))
+    if spanish_words != english_words:
+        return spanish_words > english_words
+    return bool(re.search(r"[¿¡]", question)) or (not english_words and bool(_SPANISH.search(question)))
+
+
 TRANSLATE_PROMPT = """\
 Translate the user's question about financial documents into {language}. \
 Keep company names, figures, dates and accounting terms precise (e.g. \
@@ -44,7 +60,7 @@ Reply with the translated question only."""
 
 def translate(question: str) -> str | None:
     """The question in the other language (English <-> Spanish), or None."""
-    language = "English" if _SPANISH.search(question) else "Spanish"
+    language = "English" if is_spanish(question) else "Spanish"
     try:
         reply = get_chat_model().invoke([
             {"role": "system", "content": TRANSLATE_PROMPT.format(language=language)},
@@ -103,7 +119,21 @@ def retrieve_for_question(
     user_id: str | None = "anonymous",
     document_id: UUID | None = None,
 ) -> list[RetrievedChunk]:
+    return retrieve_with_translation(db, question, top_k, user_roles, user_id, document_id)[0]
+
+
+def retrieve_with_translation(
+    db: Session,
+    question: str,
+    top_k: int | None = None,
+    user_roles: str | None = "analyst",
+    user_id: str | None = "anonymous",
+    document_id: UUID | None = None,
+) -> tuple[list[RetrievedChunk], str | None]:
+    """The chunks for `question`, and the question in the other language
+    (None when translation is off or failed)."""
     settings = get_settings()
+    translated = None
     k = top_k or settings.retrieval_top_k
     # Fetch more than k so diversifying has other documents' chunks to choose from.
     pool = k if document_id else k * 2
@@ -115,4 +145,4 @@ def retrieve_for_question(
             rankings.append(retrieve(db, question=translated, top_k=pool, user_roles=user_roles,
                                      user_id=user_id, document_id=document_id))
     merged = interleave(*rankings)
-    return merged[:k] if document_id else diversify(merged, k)
+    return (merged[:k] if document_id else diversify(merged, k)), translated

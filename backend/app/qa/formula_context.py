@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models import Cell, Chunk, NamedRange, RetrievalAuditLog, Sheet
+from app.qa.query_expansion import is_spanish
 from app.retrieval.access import can_access, parse_roles
 from app.retrieval.service import RetrievedChunk
 
@@ -106,7 +107,6 @@ _CALCULATION_QUESTION = re.compile(
     r"|how (is|was|are|were|do|does|did) .*(calculat|comput|derive|arriv|built)|formula|breakdown",
     re.IGNORECASE,
 )
-_SPANISH = re.compile(r"[áéíóúñ¿¡]|\b(c[oó]mo|cu[aá]l|qu[eé]|se calcula|de d[oó]nde)\b", re.IGNORECASE)
 MAX_EXPLAINED_FORMULAS = 2
 
 
@@ -175,7 +175,7 @@ def explain_formulas(db: Session, question: str, statements: list, sources: list
 
     if not asks_for_calculation(question):
         return []
-    spanish = bool(_SPANISH.search(question))
+    spanish = is_spanish(question)
     by_location = {(s.document_id, s.sheet_name, s.cell_range): s for s in sources if s.cell_range}
     cited = {
         (c.document_id, c.sheet_name, c.cell_range)

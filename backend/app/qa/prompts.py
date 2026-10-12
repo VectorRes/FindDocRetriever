@@ -68,6 +68,10 @@ Excel cells). Follow these rules strictly:
    the period asked; if the labels don't say which column is which, don't \
    pick one — say the sources don't make it clear and set self_confidence \
    to "low".
+13. Answer from the financial statements' own rows (balance sheet / estado    de situación financiera, income statement / estado de resultados or de    actividades, cash flow statement) rather than notes, highlights, letters    or narrative text, when a statement row gives what is asked. A "Total"    line inside a note or breakdown table is the total of that breakdown,    not of the statement line the QUESTION names: asked for total assets,    answer with the row labelled total assets, never a note's total. Prefer    a table's exact figure over a rounded one in text ("$129 billion").    When a row has several columns, use the one for the period AND span    asked ("Six Months Ended" for six months, the year asked for a year).
+   Give the figure asked for; add breakdowns only when the QUESTION asks \
+   for them, and never present a percentage or growth rate as an amount \
+   (a "20" in a growth table is 20%, not 20 million).
 """
 
 # ID-HU-BE-009: run before generation, as its own focused task.

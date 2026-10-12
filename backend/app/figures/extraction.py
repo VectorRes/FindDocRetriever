@@ -519,7 +519,7 @@ def rows_labelled(
         if not row_label:
             continue
         keys = _row_label_keys(row_label)
-        if keys & (unwanted - wanted) or not _has_period_columns(chunk.text):
+        if keys & (unwanted - wanted) or not has_period_columns(chunk.text):
             # A row whose columns aren't labelled with periods ("column 3=…",
             # or a mangled heading) can't be read reliably: it isn't put first.
             continue
@@ -533,7 +533,7 @@ def rows_labelled(
     return sources, bool(exact)
 
 
-def _has_period_columns(source_text: str) -> bool:
+def has_period_columns(source_text: str) -> bool:
     """Every labelled value of the row sits under a heading naming a period
     (a year or a date), and at least one does."""
     columns = labelled_columns(source_text)
