@@ -84,6 +84,10 @@ class LLMFigure(BaseModel):
         ),
     )
     label: str | None = Field(default=None, description="The line-item label exactly as written in the source.")
+    entity: str | None = Field(
+        default=None,
+        description="The company the figure belongs to, as named in the source, its title or the file name.",
+    )
     label_matches_metric: bool = Field(
         default=True,
         description=(
@@ -144,6 +148,9 @@ class ExtractedFigure:
     currency: str | None = None
     period: str | None = None
     label: str | None = None
+    # The company the figure is for, so callers combining documents (BE-010)
+    # can tell two companies' statements apart.
+    entity: str | None = None
     citation: ResolvedCitation | None = None
     confidence: str = "low"  # "high" | "medium" | "low"
     reason: str | None = None
@@ -167,6 +174,80 @@ _COVERAGE_WORDS = {
 _QUARTER = re.compile(r"\b(q[1-4]|[1-4]q|quarter|trimestre|[1-4]t)\b", re.IGNORECASE)
 _HALF = re.compile(r"\b(h[12]|half|semestre|[12]s)\b", re.IGNORECASE)
 _YEAR = re.compile(r"^\s*(fy\s*)?\d{4}\s*$|\b(fy\s*\d{2,4}|year|annual|año|anual)\b", re.IGNORECASE)
+
+
+_PERIOD_WORDING = re.compile(
+    r"\b(as of|as at|for the|(?:three|six|nine|twelve) months ended|quarters? ended|year to date|year-to-date"
+    r"|years? ended|period ended|ended|at)\b",
+    re.IGNORECASE,
+)
+
+
+def period_key(period: str | None) -> str | None:
+    """A period normalized for comparison: wording and punctuation dropped, so
+    "As of June 30, 2026" and "June 30, 2026", or "FY2024" and "2024", match.
+    (Whether a value covers a quarter or the year to date is checked
+    separately, through period_coverage.)"""
+    if not period:
+        return None
+    text = _PERIOD_WORDING.sub(" ", period.lower())
+    text = re.sub(r"\bfy\s*(\d{2,4})\b", r"\1", text)
+    text = re.sub(r"[^\w\s]", " ", text)
+    return " ".join(text.split()) or None
+
+
+# Legal-form suffixes ignored when telling companies apart ("Andina" = "Andina S.A.S.").
+_LEGAL_FORM = re.compile(
+    r"\b(s\.?\s?a\.?\s?s|s\.?\s?a|ltda|inc|ltd|llc|corp|corporation|company|co|plc|gmbh|s\.?\s?a\.?\s?de\s?c\.?\s?v)\b\.?",
+    re.IGNORECASE,
+)
+
+
+def entity_key(value: str) -> str:
+    """A company name normalized for comparison (case, punctuation, legal form)."""
+    return " ".join(re.sub(r"[^\w\s]", " ", _LEGAL_FORM.sub(" ", value.lower())).split())
+
+
+_MONTHS = {
+    "jan": 1, "ene": 1, "feb": 2, "mar": 3, "apr": 4, "abr": 4, "may": 5, "jun": 6, "jul": 7,
+    "aug": 8, "ago": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12, "dic": 12,
+}
+_QUARTER_ENDS = {(3, 31): 1, (6, 30): 2, (9, 30): 3, (12, 31): 4}
+
+
+def period_aliases(period: str | None) -> set[str]:
+    """Every name of a period: a calendar quarter-end date is also that
+    quarter ("June 30, 2026" = "Q2 2026"), and December 31 is also the year."""
+    key = period_key(period)
+    if not key:
+        return set()
+    aliases = {key}
+    match = re.search(r"\b([a-z]{3})[a-z]* (\d{1,2}) (\d{4})\b", key)  # june 30 2026
+    if match:
+        month, day, year = match.group(1), int(match.group(2)), match.group(3)
+    else:
+        match = re.search(r"\b(\d{1,2}) de ([a-z]{3})[a-z]* de (\d{4})\b", key)  # 30 de junio de 2026
+        month, day, year = (match.group(2), int(match.group(1)), match.group(3)) if match else (None, 0, "")
+    quarter = _QUARTER_ENDS.get((_MONTHS.get(month or ""), day))
+    if quarter:
+        aliases.add(f"q{quarter} {year}")
+        if quarter == 4:
+            aliases.add(year)
+    return aliases
+
+
+def same_period(a: str | None, b: str | None) -> bool:
+    return bool(period_aliases(a) & period_aliases(b))
+
+
+def distinct_periods(periods: list[str | None]) -> list[str]:
+    """The genuinely different periods among `periods` (unknown ones left
+    out): one representative of each group of names for the same period."""
+    distinct: list[str] = []
+    for period in periods:
+        if period and not any(same_period(period, seen) for seen in distinct):
+            distinct.append(period)
+    return distinct
 
 
 def expected_coverage(period: str | None) -> set[str] | None:
@@ -337,6 +418,7 @@ def extract_figure(
         currency=(figure.currency or "").upper() or single_currency(citation.text),
         period=figure.period or single_year(citation.text, figure.value_text),
         label=figure.label,
+        entity=figure.entity,
         citation=citation,
         confidence="medium" if issues else "high",
         reason=" ".join(issues.values()) or None,

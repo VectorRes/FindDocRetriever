@@ -469,3 +469,35 @@ def test_single_year_fallback(text, value_text, expected):
 )
 def test_single_currency_fallback(text, expected):
     assert single_currency(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "same"),
+    [("As of June 30, 2026", "June 30, 2026", True), ("FY2024", "2024", True), ("FY 2024", "2024", True),
+     ("Quarter Ended June 30 2026", "June 30, 2026", True), ("Q1 2025", "Q1 2025", True),
+     ("2024", "2025", False), ("Q1 2025", "Q2 2025", False)],
+)
+def test_period_key(a, b, same):
+    from app.figures.extraction import period_key
+
+    assert (period_key(a) == period_key(b)) is same
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "same"),
+    [("June 30, 2026", "Q2 2026", True), ("As of June 30, 2026", "Q2 2026", True),
+     ("30 de junio de 2026", "Q2 2026", True), ("December 31, 2025", "FY2025", True),
+     ("31 de diciembre de 2024", "2024", True), ("September 30, 2026", "Q3 2026", True),
+     ("June 30, 2026", "Q2 2025", False), ("June 15, 2026", "Q2 2026", False), ("Q2 2026", "2026", False)],
+)
+def test_quarter_end_dates_are_the_quarter(a, b, same):
+    from app.figures.extraction import same_period
+
+    assert same_period(a, b) is same
+
+
+def test_distinct_periods_groups_names_of_one_period_and_skips_unknown():
+    from app.figures.extraction import distinct_periods
+
+    assert distinct_periods(["As of June 30, 2026", None, "Q2 2026", "June 30, 2026"]) == ["As of June 30, 2026"]
+    assert distinct_periods(["2024", "FY2025"]) == ["2024", "FY2025"]

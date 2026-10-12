@@ -26,6 +26,7 @@ from app.figures.extraction import (
     ExtractionServiceError,
     extract_figure,
     find_exchange_rate,
+    distinct_periods,
 )
 from app.qa.schemas import ResolvedCitation
 
@@ -73,10 +74,6 @@ class Comparison:
     exchange_rates: list[ExchangeRate] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     escalation: EscalationSuggestion | None = None
-
-
-def _period_key(period: str | None) -> str | None:
-    return " ".join(period.lower().split()) if period else None
 
 
 def _within(a: float, b: float, tolerance: float) -> bool:
@@ -135,8 +132,8 @@ def summarize(
             notes.append(f"{document.filename} is not the current version of its document.")
         rows.append(row)
 
-    periods = [_period_key(row.period) for row in rows if row.found]
-    across_periods = len(periods) > 1 and all(periods) and len(set(periods)) > 1
+    periods = [row.period for row in rows if row.found]
+    across_periods = len(periods) > 1 and all(periods) and len(distinct_periods(periods)) > 1
     # Same period label, different length of time: e.g. "Q3 2026" for both the
     # three-month and the nine-month column. Those aren't expected to match.
     coverages = {row.period_coverage for row in rows if row.found and row.period_coverage}
