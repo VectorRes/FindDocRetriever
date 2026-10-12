@@ -10,8 +10,9 @@ written, then **verify in code that the number appears in that source**
 (ID-HU-BE-009's figure check). A figure that fails verification is reported
 as not found; it is never invented.
 """
+import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 from uuid import UUID
 
@@ -25,6 +26,15 @@ from app.qa.prompts import describe_location, label_chunks
 from app.qa.schemas import ResolvedCitation
 from app.retrieval.access import can_access, parse_roles
 from app.retrieval.service import RetrievedChunk, retrieve
+
+logger = logging.getLogger(__name__)
+
+MODEL_UNAVAILABLE = "The language model service didn't respond, so the figure couldn't be extracted. Try again."
+
+
+class ExtractionServiceError(RuntimeError):
+    """Every extraction in a request failed because the model (or embedding)
+    service didn't respond: the caller should answer 503, not "not found"."""
 
 UNIT_SCALES = {"units": 1.0, "thousands": 1e3, "millions": 1e6, "billions": 1e9}
 # Wording a document must actually contain before a scale is applied — the
@@ -65,7 +75,14 @@ class LLMFigure(BaseModel):
         default=None,
         description="ISO currency code (COP, USD, EUR…) if the source, its headers or file name state it.",
     )
-    period: str | None = Field(default=None, description="The period the figure is for, e.g. 'FY2024', 'Q3 2024'.")
+    period: str | None = Field(
+        default=None,
+        description=(
+            "The period the figure is for, e.g. '2024', 'FY2024', 'Q3 2024'. Read it from the value's "
+            "column header (e.g. '2024=610000' means 2024), the sheet title or the file name. "
+            "Leave it empty only if nothing in the sources says which period it is."
+        ),
+    )
     label: str | None = Field(default=None, description="The line-item label exactly as written in the source.")
     label_matches_metric: bool = Field(
         default=True,
@@ -77,6 +94,19 @@ class LLMFigure(BaseModel):
     other_periods: list[str] = Field(
         default_factory=list,
         description="Other periods the same document gives this figure for, if any.",
+    )
+    column_header: str | None = Field(
+        default=None,
+        description="The column header the value sits under, exactly as written (e.g. 'Three Months Ended June 27, 2026').",
+    )
+    period_coverage: Literal[
+        "three_months", "six_months", "nine_months", "twelve_months", "point_in_time", "unknown"
+    ] = Field(
+        default="unknown",
+        description=(
+            "How long a period the value covers: three/six/nine/twelve months for income-statement or "
+            "cash-flow amounts; point_in_time for balance-sheet amounts at a date; unknown if not stated."
+        ),
     )
 
 
@@ -92,6 +122,13 @@ and give that source's id.
 - If the document gives the metric for several periods: use PERIOD when it \
 is given; otherwise use the most recent one and list the others in \
 other_periods.
+- Prefer the consolidated total for the whole entity over segment, \
+geographic or product breakdowns of the same line item.
+- Statements often have both quarterly and year-to-date columns (e.g. \
+"Three Months Ended" and "Nine Months Ended"). Copy the header of the column \
+the value is under into column_header and say what it covers in \
+period_coverage. If PERIOD names a quarter, use the three-month column; if \
+it names a year, use the twelve-month column.
 - If no source states the metric, set found=false.
 """
 
@@ -110,6 +147,39 @@ class ExtractedFigure:
     citation: ResolvedCitation | None = None
     confidence: str = "low"  # "high" | "medium" | "low"
     reason: str | None = None
+    # What the value covers ("three_months", "nine_months", "point_in_time"...)
+    # and the column it was read from, so callers can tell a quarter from
+    # year-to-date figures that share a period label.
+    period_coverage: str | None = None
+    column_header: str | None = None
+    # Why confidence isn't high, by kind: "scale", "label", "periods",
+    # "coverage". `reason` joins them; callers with their own checks (e.g.
+    # BE-010's label mapping) can drop the ones they settle.
+    issues: dict[str, str] = field(default_factory=dict)
+    # True when the model/embedding service failed (vs. "not in the document").
+    error: bool = False
+
+
+_COVERAGE_WORDS = {
+    "three_months": "three months", "six_months": "six months", "nine_months": "nine months",
+    "twelve_months": "twelve months", "point_in_time": "a single date",
+}
+_QUARTER = re.compile(r"\b(q[1-4]|[1-4]q|quarter|trimestre|[1-4]t)\b", re.IGNORECASE)
+_HALF = re.compile(r"\b(h[12]|half|semestre|[12]s)\b", re.IGNORECASE)
+_YEAR = re.compile(r"^\s*(fy\s*)?\d{4}\s*$|\b(fy\s*\d{2,4}|year|annual|año|anual)\b", re.IGNORECASE)
+
+
+def expected_coverage(period: str | None) -> set[str] | None:
+    """Coverages consistent with a requested period, or None if it doesn't say."""
+    if not period:
+        return None
+    if _QUARTER.search(period):
+        return {"three_months", "point_in_time"}
+    if _HALF.search(period):
+        return {"six_months", "point_in_time"}
+    if _YEAR.search(period):
+        return {"twelve_months", "point_in_time"}
+    return None
 
 
 def _citation(source_id: str, chunk: RetrievedChunk) -> ResolvedCitation:
@@ -132,6 +202,40 @@ def _build_prompt(metric: str, period: str | None, source_map: dict[str, Retriev
         lines.append(chunk.text.strip())
         lines.append("")
     return "\n".join(lines)
+
+
+_YEAR_IN_TEXT = re.compile(r"(?<!\d)(19\d{2}|20\d{2})(?!\d)")
+
+
+def single_year(text: str, value_text: str | None = None) -> str | None:
+    """The year a source mentions, when it mentions exactly one ("Año 2024 …
+    2024=610000" -> "2024"). Fallback for when the model leaves the period
+    empty; a source naming several years is ambiguous, so it gives None.
+    The figure itself is left out, so a value of 2010 isn't read as a year."""
+    if value_text:
+        digits = re.sub(r"\D", "", value_text)
+        text = re.sub(rf"(?<!\d){digits}(?!\d)", " ", text) if digits else text
+    years = set(_YEAR_IN_TEXT.findall(text))
+    return years.pop() if len(years) == 1 else None
+
+
+_CURRENCY_MENTIONS = {
+    "COP": re.compile(r"\bCOP\b|pesos colombianos", re.IGNORECASE),
+    "USD": re.compile(r"\bUSD\b|US\$|d[oó]lares|\bdollars?\b", re.IGNORECASE),
+    "EUR": re.compile(r"\bEUR\b|€|\beuros?\b", re.IGNORECASE),
+    "MXN": re.compile(r"\bMXN\b|pesos mexicanos", re.IGNORECASE),
+    "PEN": re.compile(r"\bPEN\b|soles", re.IGNORECASE),
+    "CLP": re.compile(r"\bCLP\b|pesos chilenos", re.IGNORECASE),
+    "GBP": re.compile(r"\bGBP\b|£|pounds? sterling", re.IGNORECASE),
+}
+
+
+def single_currency(text: str) -> str | None:
+    """The currency a source states, when it states exactly one ("Cifras en
+    pesos colombianos (COP)" -> "COP"). Fallback for when the model leaves
+    the currency empty; a source naming several is ambiguous, so it gives None."""
+    found = [code for code, pattern in _CURRENCY_MENTIONS.items() if pattern.search(text)]
+    return found[0] if len(found) == 1 else None
 
 
 def _verified(
@@ -171,20 +275,27 @@ def extract_figure(
         return result
 
     query = f"{metric} {period}" if period else metric
-    chunks = retrieve(
-        db, question=query, top_k=8, user_roles=user_roles, user_id=user_id, document_id=document.id
-    )
-    if not chunks:
-        result.reason = "No accessible content in this document matches the metric."
+    try:
+        chunks = retrieve(
+            db, question=query, top_k=8, user_roles=user_roles, user_id=user_id, document_id=document.id
+        )
+        if not chunks:
+            result.reason = "No accessible content in this document matches the metric."
+            return result
+
+        source_map = label_chunks(chunks)
+        figure = get_chat_model().with_structured_output(LLMFigure).invoke(
+            [
+                {"role": "system", "content": EXTRACTION_PROMPT},
+                {"role": "user", "content": _build_prompt(metric, period, source_map)},
+            ]
+        )
+    except Exception:  # provider/network errors surface under many exception types
+        logger.exception("Figure extraction failed for %s in document %s", metric, document_id)
+        result.reason = MODEL_UNAVAILABLE
+        result.error = True
         return result
 
-    source_map = label_chunks(chunks)
-    figure = get_chat_model().with_structured_output(LLMFigure).invoke(
-        [
-            {"role": "system", "content": EXTRACTION_PROMPT},
-            {"role": "user", "content": _build_prompt(metric, period, source_map)},
-        ]
-    )
     if not figure.found:
         result.reason = f"This document doesn't state {metric}."
         return result
@@ -195,23 +306,26 @@ def extract_figure(
         return result
 
     value, citation = verified
-    reasons = []
-    confidence = "high"
+    issues: dict[str, str] = {}
     unit_scale = figure.unit_scale
     if not _documented_scale(unit_scale, source_map):
         unit_scale = "units"
-        confidence = "medium"
-        reasons.append(
+        issues["scale"] = (
             f"The figures may be in {figure.unit_scale}, but the document doesn't say so; "
             "the value is shown as written."
         )
     if not figure.label_matches_metric:
-        confidence = "medium"
-        reasons.append(f"The line item is labelled '{figure.label}', which may not be exactly {metric}.")
+        issues["label"] = f"The line item is labelled '{figure.label}', which may not be exactly {metric}."
     if figure.other_periods and not period:
-        confidence = "medium"
-        reasons.append(
+        issues["periods"] = (
             f"The document also has {', '.join(figure.other_periods)}; the most recent period was used."
+        )
+    expected = expected_coverage(period)
+    if expected and figure.period_coverage not in expected | {"unknown"}:
+        header = f" ({figure.column_header})" if figure.column_header else ""
+        issues["coverage"] = (
+            f"The value covers {_COVERAGE_WORDS[figure.period_coverage]}{header}, "
+            f"which doesn't match the period requested ({period})."
         )
 
     return ExtractedFigure(
@@ -220,12 +334,15 @@ def extract_figure(
         value=value * UNIT_SCALES[unit_scale],
         value_text=figure.value_text,
         unit_scale=unit_scale,
-        currency=(figure.currency or "").upper() or None,
-        period=figure.period,
+        currency=(figure.currency or "").upper() or single_currency(citation.text),
+        period=figure.period or single_year(citation.text, figure.value_text),
         label=figure.label,
         citation=citation,
-        confidence=confidence,
-        reason=" ".join(reasons) or None,
+        confidence="medium" if issues else "high",
+        reason=" ".join(issues.values()) or None,
+        period_coverage=None if figure.period_coverage == "unknown" else figure.period_coverage,
+        column_header=figure.column_header,
+        issues=issues,
     )
 
 
@@ -290,12 +407,16 @@ def find_exchange_rate(
     lines = [f"CURRENCIES: {from_currency} and {to_currency}", "", "SOURCES:"]
     for source_id, chunk in source_map.items():
         lines += [f"[{source_id}] ({describe_location(chunk)})", chunk.text.strip(), ""]
-    found = get_chat_model().with_structured_output(LLMExchangeRate).invoke(
-        [
-            {"role": "system", "content": EXCHANGE_RATE_PROMPT},
-            {"role": "user", "content": "\n".join(lines)},
-        ]
-    )
+    try:
+        found = get_chat_model().with_structured_output(LLMExchangeRate).invoke(
+            [
+                {"role": "system", "content": EXCHANGE_RATE_PROMPT},
+                {"role": "user", "content": "\n".join(lines)},
+            ]
+        )
+    except Exception:
+        logger.exception("Exchange-rate lookup failed for %s -> %s", from_currency, to_currency)
+        return None  # treated like an undocumented rate: values are shown unconverted
     if not found.found or not found.base_currency or not found.quote_currency:
         return None
     verified = _verified(source_map, found.source_id, found.rate_text)

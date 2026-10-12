@@ -291,8 +291,8 @@ function ReconciliationBanner({ comparison }: { comparison: Comparison }) {
   }
   return (
     <div style={bannerStyle("#f8fafc", "#475569")}>
-      Reconciliation can't be determined: fewer than two comparable values, or a currency without a documented
-      exchange rate.
+      Reconciliation can't be determined: fewer than two comparable values, a currency without a documented
+      exchange rate, or a period that couldn't be identified. See the notes below.
     </div>
   );
 }

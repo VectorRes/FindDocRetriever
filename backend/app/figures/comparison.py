@@ -20,7 +20,13 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.db.models import Document
 from app.escalation import EscalationSuggestion, suggest_escalation
-from app.figures.extraction import ExchangeRate, ExtractedFigure, extract_figure, find_exchange_rate
+from app.figures.extraction import (
+    ExchangeRate,
+    ExtractedFigure,
+    ExtractionServiceError,
+    extract_figure,
+    find_exchange_rate,
+)
 from app.qa.schemas import ResolvedCitation
 
 
@@ -41,6 +47,8 @@ class ComparisonRow:
     citation: ResolvedCitation | None = None
     confidence: str = "low"
     reason: str | None = None
+    period_coverage: str | None = None
+    column_header: str | None = None
     # The value in the comparison currency (= value when no conversion was needed).
     comparable_value: float | None = None
     converted: bool = False
@@ -110,6 +118,8 @@ def summarize(
             citation=figure.citation,
             confidence=figure.confidence,
             reason=figure.reason,
+            period_coverage=figure.period_coverage,
+            column_header=figure.column_header,
         )
         if figure.found:
             if figure.currency is None or target is None or figure.currency == target:
@@ -127,6 +137,15 @@ def summarize(
 
     periods = [_period_key(row.period) for row in rows if row.found]
     across_periods = len(periods) > 1 and all(periods) and len(set(periods)) > 1
+    # Same period label, different length of time: e.g. "Q3 2026" for both the
+    # three-month and the nine-month column. Those aren't expected to match.
+    coverages = {row.period_coverage for row in rows if row.found and row.period_coverage}
+    if len(coverages) > 1 and not across_periods:
+        across_periods = True
+        notes.append(
+            "The values cover different lengths of time (" + ", ".join(sorted(c.replace("_", " ") for c in coverages))
+            + "), so they're compared as different periods."
+        )
 
     base_value = rows[0].comparable_value
     if base_value is not None:
@@ -152,6 +171,19 @@ def summarize(
         reconciles = None
     else:
         reconciles = all(_within(row.comparable_value, comparable[0].comparable_value, tolerance) for row in comparable)
+
+    # A difference only means "doesn't reconcile" if the values are known to be
+    # for the same period. With no period requested and some value's period
+    # unknown, it may just be 2024 vs 2025: say so rather than flag a discrepancy.
+    undated = [row.filename for row in rows if row.found and not row.period]
+    if reconciles is False and period is None and undated:
+        reconciles = None
+        for row in rows:
+            row.matches_baseline = None
+        notes.append(
+            f"The period of {', '.join(undated)} couldn't be determined, so it can't be told whether "
+            "these values should match. Set the Period field to compare them as the same period."
+        )
 
     escalation = None
     if reconciles is False:
@@ -185,6 +217,8 @@ def compare_documents(
         extract_figure(db, document.id, metric, user_roles=user_roles, user_id=user_id, period=period)
         for document in documents
     ]
+    if all(figure.error for figure in figures):
+        raise ExtractionServiceError("The language model service didn't respond. Try again in a moment.")
 
     baseline_currency = figures[0].currency if figures[0].found else None
     currencies = [f.currency for f in figures if f.found and f.currency]

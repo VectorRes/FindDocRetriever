@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.db.models import Document
 from app.db.session import get_db
 from app.figures.comparison import compare_documents
+from app.figures.extraction import ExtractionServiceError
 from app.figures.export import comparison_workbook
 from app.schemas import CompareRequest, ComparisonOut
 
@@ -43,10 +44,13 @@ def compare(
             raise HTTPException(status_code=404, detail=f"Document {document_id} not found")
         documents.append(document)
 
-    comparison = compare_documents(
-        db, documents, request.metric.strip(), period=request.period,
-        user_roles=x_user_role, user_id=x_user_id,
-    )
+    try:
+        comparison = compare_documents(
+            db, documents, request.metric.strip(), period=request.period,
+            user_roles=x_user_role, user_id=x_user_id,
+        )
+    except ExtractionServiceError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     db.commit()  # persist the retrieval audit entries (ID-HU-BE-013)
     return ComparisonOut.model_validate(comparison)
 

@@ -20,10 +20,14 @@ from app.figures.export import comparison_workbook
 from app.figures.extraction import (
     ExchangeRate,
     ExtractedFigure,
+    ExtractionServiceError,
     LLMExchangeRate,
     LLMFigure,
+    expected_coverage,
     extract_figure,
     orient_rate,
+    single_currency,
+    single_year,
 )
 from app.ingestion.service import ingest_excel_file
 from app.qa.confidence import primary_reading
@@ -336,3 +340,132 @@ def test_excel_export_has_values_citations_and_the_discrepancy():
     assert any("sheet 'Hoja'" in v for v in flat)              # citation column
     assert any(row[11] == "NO" for row in values if len(row) > 11)
     assert "Accounting/Consolidation" in flat
+
+
+# --- period coverage (three months vs year-to-date) and model failures ---------------
+
+@pytest.mark.parametrize(
+    ("period", "expected"),
+    [("Q3 2026", {"three_months", "point_in_time"}), ("3T 2025", {"three_months", "point_in_time"}),
+     ("FY2024", {"twelve_months", "point_in_time"}), ("2024", {"twelve_months", "point_in_time"}),
+     ("H1 2025", {"six_months", "point_in_time"}), (None, None), ("June 2026", None)],
+)
+def test_expected_coverage(period, expected):
+    assert expected_coverage(period) == expected
+
+
+def test_year_to_date_value_for_a_quarter_is_flagged(monkeypatch, db_session, tmp_path, cleanup):
+    doc = _ingest(db_session, tmp_path, "10Q_coverage_fe003.xlsx",
+                  [["Net income", "Three Months", "Nine Months"], ["Net income", 29789, 101464]])
+    cleanup.append(doc)
+    _patch(monkeypatch, {doc.filename: {
+        "value_text": "101,464", "period": "Q3 2026", "label": "Net income",
+        "period_coverage": "nine_months", "column_header": "Nine Months",
+    }})
+
+    figure = extract_figure(db_session, doc.id, "net income", period="Q3 2026")
+
+    assert figure.found and figure.confidence == "medium"
+    assert figure.period_coverage == "nine_months"
+    assert "nine months" in figure.issues["coverage"]
+    assert "Nine Months" in figure.reason
+
+
+def test_matching_coverage_keeps_high_confidence(monkeypatch, db_session, tmp_path, cleanup):
+    doc = _ingest(db_session, tmp_path, "10Q_coverage_ok_fe003.xlsx",
+                  [["Net income", "Three Months", "Nine Months"], ["Net income", 29789, 101464]])
+    cleanup.append(doc)
+    _patch(monkeypatch, {doc.filename: {
+        "value_text": "29,789", "period": "Q3 2026", "label": "Net income", "period_coverage": "three_months",
+    }})
+
+    figure = extract_figure(db_session, doc.id, "net income", period="Q3 2026")
+
+    assert figure.confidence == "high" and not figure.issues
+
+
+class _BrokenModel:
+    def with_structured_output(self, schema):
+        class _Structured:
+            def invoke(self, messages):
+                raise ConnectionError("model service down")
+        return _Structured()
+
+
+def test_model_failure_is_reported_as_an_error_not_as_missing(monkeypatch, db_session, tmp_path, cleanup):
+    doc = _ingest(db_session, tmp_path, "BI_down_fe003.xlsx", [["Revenue", 4820000]])
+    cleanup.append(doc)
+    monkeypatch.setattr(extraction_module, "get_chat_model", lambda: _BrokenModel())
+
+    figure = extract_figure(db_session, doc.id, "revenue")
+
+    assert not figure.found and figure.error
+    assert "didn't respond" in figure.reason
+
+
+def test_compare_answers_503_when_the_model_is_down(monkeypatch, db_session, tmp_path, cleanup):
+    a = _ingest(db_session, tmp_path, "BI_down_a_fe003.xlsx", [["Revenue", 4820000]])
+    b = _ingest(db_session, tmp_path, "BI_down_b_fe003.xlsx", [["Revenue", 4795000]])
+    cleanup += [a, b]
+    monkeypatch.setattr(extraction_module, "get_chat_model", lambda: _BrokenModel())
+
+    with pytest.raises(ExtractionServiceError):
+        compare_documents(db_session, [a, b], "revenue")
+    with pytest.raises(HTTPException) as exc_info:
+        compare(CompareRequest(document_ids=[a.id, b.id], metric="revenue"), db=db_session)
+    assert exc_info.value.status_code == 503
+
+
+def test_same_label_different_coverage_is_compared_as_different_periods():
+    quarter, year_to_date = _fig(29789), _fig(101464)
+    quarter.period, year_to_date.period = "Q3 2026", "Q3 2026"
+    quarter.period_coverage, year_to_date.period_coverage = "three_months", "nine_months"
+
+    result = summarize("net income", "Q3 2026", [_doc("IS.xlsx"), _doc("10Q.pdf")],
+                       [quarter, year_to_date], {}, tolerance=0.001)
+
+    assert result.across_periods is True
+    assert result.reconciles is None and result.escalation is None
+    assert any("different lengths of time" in note for note in result.notes)
+
+
+def test_difference_with_an_unknown_period_is_not_called_a_discrepancy():
+    # 2024 vs 2025 net income where extraction couldn't tell the periods apart.
+    result = summarize("net income", None, [_doc("EERR_2024.xlsx"), _doc("EERR_2025.xlsx")],
+                       [_fig(610000), _fig(702000)], {}, tolerance=0.001)
+
+    assert result.reconciles is None
+    assert result.escalation is None
+    assert result.rows[1].matches_baseline is None
+    assert result.rows[1].variance_abs == 92000  # the variance is still shown
+    assert any("couldn't be determined" in note for note in result.notes)
+
+
+def test_a_requested_period_still_flags_a_discrepancy_without_extracted_periods():
+    result = summarize("revenue", "2024", [_doc("EERR_2024.xlsx"), _doc("BI_2024.xlsx")],
+                       [_fig(4820000), _fig(4795000)], {}, tolerance=0.001)
+
+    assert result.reconciles is False
+    assert result.escalation is not None
+
+
+@pytest.mark.parametrize(
+    ("text", "value_text", "expected"),
+    [("Sheet 'EERR' (Año 2024), Utilidad neta: Concepto=Utilidad neta; 2024=610000", "610,000", "2024"),
+     ("Revenue: 2024=4820000; 2025=5310000", "4,820,000", None),  # two years: ambiguous
+     ("Revenue: B=4820000", "4,820,000", None),
+     ("Sheet 'Sales' (FY2023), Units: 2010", "2010", "2023")],  # the value isn't read as a year
+)
+def test_single_year_fallback(text, value_text, expected):
+    assert single_year(text, value_text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [("Sheet 'Balance' (Cifras en pesos colombianos (COP)), Total activos: 2024=6100000", "COP"),
+     ("Sheet 'Summary' (Cifras en dólares estadounidenses (USD)), Revenue: 2024=1205", "USD"),
+     ("Revenue: B=4820000", None),
+     ("Tasa de cambio USD/COP: 4000", None)],  # two currencies: ambiguous
+)
+def test_single_currency_fallback(text, expected):
+    assert single_currency(text) == expected
