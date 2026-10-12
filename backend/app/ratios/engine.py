@@ -23,7 +23,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from app.figures.extraction import UNIT_SCALES, ExtractedFigure, ExtractionServiceError, extract_figure
+from app.figures.extraction import UNIT_SCALES, ExtractedFigure, ExtractionServiceError, distinct_periods, entity_key, extract_figure
 from app.qa.schemas import ResolvedCitation
 from app.ratios.formulas import CATEGORIES, LINE_ITEMS, POSITIVE_ITEMS, RATIOS, LineItem, RatioDefinition
 from app.ratios.mapping import label_matches, statement_hint_score
@@ -48,6 +48,8 @@ class MappedInput:
     currency: str | None = None
     period: str | None = None
     label: str | None = None
+    # The company the figure is for (from extraction), if known.
+    entity: str | None = None
     # "three_months", "nine_months", "point_in_time"... and the column read.
     period_coverage: str | None = None
     column_header: str | None = None
@@ -98,10 +100,6 @@ class RatioReport:
     notes: list[str] = field(default_factory=list)
 
 
-def _period_key(period: str | None) -> str | None:
-    return " ".join(period.lower().split()) if period else None
-
-
 @dataclass(frozen=True)
 class DocumentRef:
     """What the engine needs from a Document, read once on the request's
@@ -134,6 +132,19 @@ def to_mapped_input(item: LineItem, document, figure: ExtractedFigure) -> Mapped
         )
 
     issues = dict(figure.issues) or ({"other": figure.reason} if figure.reason else {})
+    # A scale the model claimed but the document doesn't state is already
+    # ignored (the value is used as written). Ratios don't depend on it either:
+    # within one document the scale cancels out, across documents only
+    # documented scales are applied. So it's not something to review.
+    issues.pop("scale", None)
+    if item.statement == "balance_sheet" and figure.period_coverage not in (None, "point_in_time"):
+        # A balance read from a column covering a span of time is most likely
+        # the cash-flow change of the same line ("Inventory (6,696)").
+        header = f" ({figure.column_header})" if figure.column_header else ""
+        issues["coverage"] = (
+            f"{item.name} is a balance-sheet amount, but this value covers "
+            f"{figure.period_coverage.replace('_', ' ')}{header}; it may be a cash-flow change, not the balance."
+        )
     needs_review = not label_matches(item, figure.label)
     if needs_review:
         issues.pop("label", None)
@@ -152,7 +163,7 @@ def to_mapped_input(item: LineItem, document, figure: ExtractedFigure) -> Mapped
     return MappedInput(
         key=item.key, name=item.name, statement=item.statement, found=True,
         value=figure.value, value_text=figure.value_text, unit_scale=figure.unit_scale,
-        currency=figure.currency, period=figure.period, label=figure.label,
+        currency=figure.currency, period=figure.period, label=figure.label, entity=figure.entity,
         period_coverage=figure.period_coverage, column_header=figure.column_header,
         document_id=str(document.id), document_filename=document.filename,
         citation=figure.citation, confidence=confidence, needs_review=needs_review,
@@ -280,6 +291,14 @@ def compute_ratio(definition: RatioDefinition, mapped: dict[str, MappedInput]) -
         result.reasons.append(f"Missing input: {', '.join(missing)}.")
         return result
 
+    companies = _distinct_entities(inputs)
+    if len(companies) > 1:
+        result.reasons.append(
+            f"The inputs come from different companies ({', '.join(companies)}); "
+            "a ratio needs one company's statements."
+        )
+        return result
+
     currencies = sorted({i.currency for i in inputs if i.currency})
     if len(currencies) > 1:
         result.reasons.append(
@@ -296,15 +315,14 @@ def compute_ratio(definition: RatioDefinition, mapped: dict[str, MappedInput]) -
     result.value = value
     result.status = "calculated"
 
-    periods = {_period_key(i.period): i.period for i in inputs if i.period}
+    periods = distinct_periods([i.period for i in inputs])
     if len(periods) > 1:
         result.status = "needs_review"
         result.reasons.append(
-            f"The inputs are for different periods ({', '.join(sorted(periods.values()))}); "
-            "check they belong together."
+            f"The inputs are for different periods ({', '.join(periods)}); check they belong together."
         )
     elif periods:
-        result.period = next(iter(periods.values()))
+        result.period = periods[0]
 
     coverages = {
         i.period_coverage for i in inputs
@@ -346,6 +364,15 @@ def compute_ratio(definition: RatioDefinition, mapped: dict[str, MappedInput]) -
             # Not enough to hold the ratio back, but the analyst should see it.
             result.reasons.append(f"{i.name}: {i.reason}")
     return result
+
+
+def _distinct_entities(inputs) -> list[str]:
+    """The different companies among the inputs (unknown ones left out)."""
+    seen: dict[str, str] = {}
+    for i in inputs:
+        if i.found and i.entity and entity_key(i.entity):
+            seen.setdefault(entity_key(i.entity), i.entity)
+    return list(seen.values())
 
 
 def _operands(inputs: list[MappedInput]) -> dict[str, float]:
@@ -406,8 +433,13 @@ def calculate_ratios(
     if any(i.needs_review for i in mapped.values()):
         notes.append("Some inputs were mapped to non-standard line items; ratios using them are held for review.")
     found = [i for i in mapped.values() if i.found]
-    found_periods = {_period_key(i.period) for i in found}
-    if period is None and len(found_periods) > 1:
+    companies = _distinct_entities(found)
+    if len(companies) > 1:
+        notes.insert(0,
+            f"The selected documents belong to different companies ({', '.join(companies)}). "
+            "Ratios combine one company's statements: select only that company's documents."
+        )
+    if period is None and len(distinct_periods([i.period for i in found])) > 1:
         notes.append(
             "The statements contain several periods and the inputs didn't all come from the same one. "
             "Specify a period (e.g. FY2024 or Q3 2026) so every ratio uses figures from that period."

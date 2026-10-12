@@ -655,3 +655,77 @@ def test_input_from_the_wrong_column_for_the_requested_period_is_held(statements
     assert ratios["net_margin"].status == "needs_review"
     assert any("Nine Months Ended" in reason for reason in ratios["net_margin"].reasons)
     assert ratios["gross_margin"].status == "calculated"
+
+
+@pytest.mark.parametrize(
+    ("key", "label"),
+    [("cost_of_sales", "Cost of revenues"), ("accounts_receivable", "Accounts receivable, net"),
+     ("total_equity", "Total stockholders’ equity")],
+)
+def test_us_gaap_labels_are_standard(key, label):
+    assert label_matches(LINE_ITEMS[key], label)
+
+
+def test_balance_sheet_queries_ask_for_the_period_end_balance():
+    assert LINE_ITEMS["inventory"].query.endswith("(balance sheet amount at the period-end date)")
+    assert "balance sheet" not in LINE_ITEMS["net_income"].query
+
+
+def test_balance_taken_from_a_cash_flow_column_is_held(statements):
+    _, balance = statements
+    figure = _found(balance, "Inventory", -6_696, confidence="high", period_coverage="three_months",
+                    column_header="Quarter Ended June 30 2026")
+    mapped = to_mapped_input(LINE_ITEMS["inventory"], balance, figure)
+    assert mapped.coverage_mismatch and mapped.confidence == "medium"
+    assert "cash-flow change" in mapped.reason
+
+
+def test_same_date_written_differently_is_one_period(statements):
+    _, balance = statements
+    _, ratios, _ = _run({balance: BALANCE_SHEET}, [balance], ratio_keys=["current_ratio"],
+                        periods={"current_assets": "As of June 30, 2026", "current_liabilities": "June 30, 2026"})
+    assert ratios["current_ratio"].status == "calculated"
+
+
+def test_quarter_end_balance_and_quarter_flows_are_one_period(statements):
+    income, balance = statements
+    _, ratios, _ = _run({income: INCOME_STATEMENT, balance: BALANCE_SHEET}, [income, balance], ratio_keys=["roa"],
+                        periods={"net_income": "Q2 2026", "total_assets": "As of June 30, 2026"})
+    assert ratios["roa"].status == "calculated"
+
+
+def test_unknown_period_on_some_inputs_does_not_suggest_a_period(statements):
+    income, balance = statements
+    report, _, _ = _run({income: INCOME_STATEMENT, balance: BALANCE_SHEET}, [income, balance],
+                        ratio_keys=["roa"], periods={"total_assets": None})
+    assert not any("Specify a period" in note for note in report.notes)
+
+
+def test_inputs_from_different_companies_are_not_combined(statements):
+    # Andina's balance sheet with another company's (same currency) liabilities.
+    income, balance = statements
+    other = _document("Balance_Pacifico_2024.xlsx", ["Balance general"])
+    tables = {balance: {"current_assets": ("Total current assets", 2_100_000)},
+              other: {"current_liabilities": ("Pasivos corrientes", 1_600_000)}}
+    report, ratios, _ = _run(tables, [balance, other], ratio_keys=["current_ratio"], overrides={
+        "current_assets": {"entity": "Andina S.A.S."}, "current_liabilities": {"entity": "Pacífico S.A."},
+    })
+    assert ratios["current_ratio"].status == "unavailable" and ratios["current_ratio"].value is None
+    assert "different companies" in ratios["current_ratio"].reasons[0]
+    assert "different companies" in report.notes[0]
+
+
+def test_same_company_written_differently_is_combined(statements):
+    income, balance = statements
+    _, ratios, _ = _run({income: INCOME_STATEMENT, balance: BALANCE_SHEET}, [income, balance], ratio_keys=["roa"],
+                        overrides={"net_income": {"entity": "Andina"}, "total_assets": {"entity": "ANDINA S.A.S."}})
+    assert ratios["roa"].status == "calculated"
+
+
+def test_an_undocumented_scale_claim_is_not_a_review_reason(statements):
+    _, balance = statements
+    claim = "The figures may be in thousands, but the document doesn't say so; the value is shown as written."
+    figure = _found(balance, "Total current assets", 2_100_000, confidence="medium",
+                    issues={"scale": claim}, reason=claim)
+    mapped = to_mapped_input(LINE_ITEMS["current_assets"], balance, figure)
+    assert mapped.confidence == "high" and mapped.reason is None

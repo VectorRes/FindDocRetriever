@@ -41,7 +41,11 @@ def _words(text: str) -> list[str]:
 
 
 def normalize_label(label: str) -> str:
-    return " ".join(word for word in _words(label) if word not in _FILLER)
+    words = [word for word in _words(label) if word not in _FILLER]
+    # US GAAP's ", net" suffix ("Accounts receivable, net") names the same line item.
+    if len(words) > 1 and words[-1] == "net":
+        words = words[:-1]
+    return " ".join(words)
 
 
 def label_matches(item: LineItem, label: str | None) -> bool:

@@ -190,6 +190,7 @@ export interface RatioInput {
   currency: string | null;
   period: string | null;
   label: string | null;
+  entity?: string | null;
   // "three_months", "nine_months", "point_in_time"... and the column it was read from.
   period_coverage?: string | null;
   column_header?: string | null;

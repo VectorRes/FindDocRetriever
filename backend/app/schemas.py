@@ -299,6 +299,7 @@ class RatioInputOut(BaseModel):
     currency: str | None = None
     period: str | None = None
     label: str | None = None
+    entity: str | None = None
     period_coverage: str | None = None
     column_header: str | None = None
     document_id: UUID | None = None

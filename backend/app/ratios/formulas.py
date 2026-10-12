@@ -38,8 +38,12 @@ class LineItem:
     def query(self) -> str:
         # The first synonyms too ("Revenue / Ingresos / Sales / Net sales"):
         # statements often use one of them, and retrieval only sees this text.
-        names = dict.fromkeys((self.name, self.name_es, *self.synonyms[:2]))
-        return " / ".join(names)
+        names = " / ".join(dict.fromkeys((self.name, self.name_es, *self.synonyms[:2])))
+        if self.statement == "balance_sheet":
+            # Otherwise a cash-flow line with the same name ("Inventory",
+            # the quarter's *change* in inventory) can be taken for the balance.
+            return f"{names} (balance sheet amount at the period-end date)"
+        return names
 
     @property
     def accepted_labels(self) -> tuple[str, ...]:
@@ -88,7 +92,7 @@ _ITEMS = [
         "Ingresos totales", "Ingresos netos",
     )),
     LineItem("cost_of_sales", "Cost of sales", "Costo de ventas", "income_statement", (
-        "Cost of goods sold", "COGS", "Cost of revenue", "Costo de los bienes vendidos",
+        "Cost of goods sold", "COGS", "Cost of revenue", "Cost of revenues", "Costo de los bienes vendidos",
         "Costos de ventas", "Costo de mercancia vendida",
     )),
     LineItem("gross_profit", "Gross profit", "Utilidad bruta", "income_statement", (
