@@ -199,6 +199,18 @@ Endpoints:
 Los documentos existentes antes de la migración `0012_version_control` quedan
 como `approved` (ya se estaban usando para responder).
 
+### Explicación de fórmulas y conflictos en el chat
+
+- **Fórmulas:** si una fuente de Excel tiene fórmula, las filas que referencia
+  (y los named ranges) se agregan como fuentes (`app/qa/formula_context.py`).
+  Ante "¿cómo se calcula…?", la respuesta incluye el cálculo armado desde el
+  propio Excel, con cada componente citado.
+- **Conflictos:** solo se marcan cuando dos fuentes dan montos distintos para
+  la misma entidad, periodo y tipo de cifra. Presupuesto contra real no es
+  conflicto.
+- **Aclaraciones:** la respuesta a una aclaración ("Andina – 2024") se combina
+  con la pregunta original.
+
 ### Comparación entre documentos (ID-HU-FE-003)
 
 - `POST /compare` — `{"document_ids": [...2 a 6...], "metric": "net income", "period": <opcional>}`
@@ -218,6 +230,17 @@ como `approved` (ya se estaban usando para responder).
     escalar a Accounting/Consolidation.
   - **Periodos distintos** (p. ej. ingresos 2024 vs. 2025): solo variación,
     `across_periods=true`, sin veredicto de conciliación ni escalamiento.
+    También cuenta como periodo distinto el mismo rótulo con distinto lapso:
+    "Q3 2026" de tres meses contra el acumulado de nueve. La extracción informa
+    la columna leída (`column_header`) y lo que cubre (`period_coverage`). Si no
+    coincide con el `period` pedido, baja a confianza media con el motivo.
+  - **Periodo desconocido**: si no se pidió `period` y algún valor no tiene
+    periodo identificable, una diferencia **no** se marca como discrepancia ni
+    se escala. Se muestra la variación y una nota que pide indicar el periodo.
+- **Excel con título**: el chunker toma como encabezado la primera fila con al
+  menos dos valores distintos. Las filas de arriba (título, "Cifras en COP") se
+  agregan como contexto a cada chunk, así cada cifra lleva su año y su moneda.
+  Los documentos ingeridos antes de este cambio hay que volver a subirlos.
   - **Monedas distintas**: se muestran los valores originales y se busca una
     **tasa de cambio documentada** en el corpus (con su cita); si existe, se
     convierte a la moneda de la base; si no, se avisa y no se convierte (nunca
@@ -227,6 +250,50 @@ como `approved` (ya se estaban usando para responder).
   variaciones, citas, tasas de cambio, notas y la sugerencia de escalamiento.
   La exportación a PDF es la impresión del navegador ("Save as PDF"), con una
   hoja de estilos de impresión que deja solo la tabla.
+
+### Cálculo de ratios financieros (ID-HU-BE-010)
+
+- `GET /ratios/definitions` — la librería de fórmulas (`app/ratios/formulas.py`):
+  15 ratios en cuatro categorías.
+  - **Liquidez:** current, quick, cash ratio.
+  - **Solvencia:** debt-to-equity, debt ratio, interest coverage.
+  - **Rentabilidad:** gross / operating / EBITDA / net margin, ROA, ROE.
+  - **Eficiencia:** asset, inventory, receivables turnover.
+  Se usan saldos de cierre del periodo, sin promedios de apertura y cierre.
+- `POST /ratios` — `{"document_ids": [...1 a 6...], "period": <opcional>, "ratios": <opcional>, "categories": <opcional>}`
+  (respeta `X-User-Role`). Cada entrada de las fórmulas (utilidad neta, activos
+  totales…) se busca **una sola vez entre todos los documentos elegidos** con
+  `extract_figure` de FE-003, así que hereda su garantía de no inventar cifras.
+  Primero se prueba el documento cuyo nombre u hojas sugieren el estado
+  correcto: "EERR", "resultados" o "P&L" para el estado de resultados;
+  "balance" o "situación financiera" para el balance. Así un ROA combina solo
+  la utilidad neta del estado de resultados con los activos del balance.
+  Cada ratio trae:
+  - `value`: fracción si `unit="percent"`, múltiplo si `unit="times"`;
+  - `inputs[]`: cada línea usada, con etiqueta, valor y **cita**;
+  - `citations[]`, `cross_document` y `reasons[]`.
+  El `status` es uno de estos:
+  - `calculated`.
+  - `needs_review`: el valor se calcula, pero la UI lo **retiene** hasta que el
+    analista confirme que lo revisó. Pasa en cualquiera de estos casos:
+    - una entrada se mapeó a una etiqueta no estándar (p. ej. "Short-Term
+      Obligations" para *current liabilities*);
+    - las entradas son de periodos distintos, o las del estado de resultados
+      cubren lapsos distintos (tres contra nueve meses);
+    - una entrada no corresponde al periodo pedido (`period_coverage` de FE-003);
+    - un saldo que nunca es negativo sale negativo (p. ej. patrimonio negativo);
+    - el resultado sale del rango plausible (p. ej. un margen > 100 %).
+  - `unavailable`: falta una entrada, las monedas son distintas o el
+    denominador es cero.
+  Detalles de funcionamiento:
+  - Cuando todas las entradas salen del mismo documento, el ratio usa las
+    cifras tal como están escritas: la escala del documento se cancela, así que
+    no importa si la extracción aplicó "en millones" solo a algunas.
+  - Las entradas se extraen en paralelo (`RATIO_EXTRACTION_WORKERS`, 6 por
+    defecto; cada hilo con su propia sesión de base de datos).
+  - Si el LLM no responde en ninguna extracción, la respuesta es **503**. Si
+    falla solo en algunas, esas entradas quedan sin dato y una nota pide
+    reintentar. `/compare` se comporta igual.
 
 ### Confidentialidad y control de acceso
 
@@ -300,6 +367,15 @@ Docker Desktop sobre Windows, donde los bind mounts no reenvían eventos `inotif
   %, y la cita de cada valor (abre el panel de fuente); las filas que no
   concilian se resaltan en rojo con el equipo sugerido; botones "Export to
   Excel" y "Save as PDF".
+- **Ratios (ID-HU-BE-010)**: pestaña "Ratios",
+  `frontend/src/components/RatiosView.tsx`.
+  - **Entrada:** selector de estados (1 a 6), categorías y periodo opcional.
+  - **Tarjetas por categoría:** cada una muestra el ratio (`25.0%`, `1.75x`),
+    su fórmula, el chip "cross-document" y una tabla con cada línea usada y su
+    cita, que abre el panel de fuente.
+  - **Ratios retenidos:** muestran "held for review" con el motivo y la línea
+    marcada "low-confidence mapping"; el valor aparece al confirmar con
+    "I've reviewed it — show ratio".
 
 ## Probar con un PDF de ejemplo
 
@@ -371,6 +447,15 @@ Backend:
 docker compose exec api pytest
 ```
 
+- **Base de datos de tests:** los tests de integración nunca usan la base de
+  desarrollo. `tests/conftest.py` cambia a `TEST_DATABASE_URL` o, si no está
+  definida, a la base de `DATABASE_URL` con sufijo `_test` (`findoc_rag_test`).
+  La crea si no existe, le aplica las migraciones y la vacía al inicio de cada
+  corrida. Así los documentos que subas usando la app no desplazan los datos de
+  los tests, y los tests no escriben en tus datos.
+- La imagen copia `tests/` al construirse; para correr los tests actuales sin
+  reconstruir: `docker compose cp backend/tests/. api:/app/tests/` y luego
+  `docker compose exec api pytest`.
 - `test_excel_parser.py`, `test_pdf_parser.py`, `test_chunker.py`, `test_pdf_chunker.py`
   no requieren base de datos. Los de PDF generan sus propios archivos `.pdf`
   mínimos en `tests/pdf_helpers.py`, sin depender de una librería de autoría de
@@ -388,6 +473,13 @@ docker compose exec api pytest
 - `test_document_resolution.py` (integración, requiere Postgres) cubre
   ID-HU-FE-002: lectura de celda/fórmula, supersesión de versión, acceso
   restringido y descarga del archivo original.
+- `test_ratios.py` cubre ID-HU-BE-010.
+  - **Sin base ni LLM** (extractor falso): cada fórmula contra estados de
+    ejemplo, el mapeo de etiquetas, los ratios entre documentos, los ratios
+    retenidos para revisión, periodos y monedas distintos, denominador cero,
+    rango plausible y escala.
+  - **De punta a punta** (requiere Postgres, LLM guionado): ROA con dos
+    workbooks ingeridos de verdad, y una cifra inventada que no llega al ratio.
 
 Frontend:
 
@@ -415,6 +507,10 @@ backend/app/
     extraction.py           # ID-HU-FE-003: extract_figure (compartido con BE-010) + tasas de cambio documentadas
     comparison.py             # variaciones, conciliación, monedas (aritmética determinística)
     export.py                   # Excel de la comparación
+  ratios/                   # ID-HU-BE-010
+    formulas.py               # librería de ratios y líneas de los estados (sinónimos en/es)
+    mapping.py                # ¿la etiqueta encontrada es la entrada de la fórmula? + pistas de estado
+    engine.py                 # búsqueda de entradas entre documentos, aritmética y citas
   schemas.py                # DTOs Pydantic de la API (incluye PdfStructureResponse, AnswerResponse,
                              # DocumentResolutionOut, CellOut)
   ingestion/
