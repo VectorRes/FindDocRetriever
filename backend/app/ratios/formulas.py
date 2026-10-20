@@ -109,6 +109,9 @@ _ITEMS = [
     LineItem("net_income", "Net income", "Utilidad neta", "income_statement", (
         "Net profit", "Net earnings", "Profit for the year", "Profit for the period",
         "Ganancia neta", "Utilidad del ejercicio", "Resultado del ejercicio", "Utilidad neta del ejercicio",
+        # NIIF (IFRS) wording used in Colombian statements.
+        "Ganancia (pérdida) del periodo", "Ganancia o (pérdida) del periodo", "Ganancia (pérdida) del ejercicio",
+        "Resultado del periodo", "Utilidad del periodo", "Utilidad (pérdida) del ejercicio",
     )),
     # Balance sheet
     LineItem("cash", "Cash and cash equivalents", "Efectivo y equivalentes de efectivo", "balance_sheet", (

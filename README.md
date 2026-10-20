@@ -342,6 +342,34 @@ documentos, en la versión por defecto de cada uno:
     falla solo en algunas, esas entradas quedan sin dato y una nota pide
     reintentar. `/compare` se comporta igual.
 
+### Dashboard de cifras clave y ratios (ID-HU-FE-004)
+
+Muestra los ratios de liquidez, solvencia, rentabilidad y eficiencia de cada empresa, **periodo por periodo**, con la cita de cada cifra, la tendencia y los valores atípicos. Usa el motor de BE-010; no hay otra lógica de cálculo.
+
+- **Catálogo** (`app/dashboard/catalog.py`, sin LLM): por cada documento vigente y procesado:
+  - **Empresa:** se toma del nombre del archivo ("EERR_Andina_2024.xlsx" → Andina; "Andina" y "Andina S.A.S." son la misma).
+  - **Periodos:** se toman de los encabezados de columna que rotula el chunker ("2024", "Three Months Ended June 30, 2026" → Q2 2026, "Al 31 de diciembre de 2025" → 2025). Solo años completos y trimestres: los acumulados de seis o nueve meses, el presupuesto y las variaciones no cuentan. Se usan los periodos de las filas que son líneas de los estados, así una columna auxiliar de otra hoja no aparece como periodo.
+  - **Estados:** un documento tiene el estado de resultados o el balance si una de sus filas es una línea estándar de ese estado.
+  - Solo se listan los documentos que el rol puede ver.
+- **Resultados guardados** (`dashboard_runs` + `ratio_snapshots`, migración `0014_ratio_dashboard`):
+  - "Calculate" ejecuta `calculate_ratios` por periodo, con los documentos de la empresa para ese periodo, y guarda cada ratio con sus entradas y citas.
+  - Abrir el dashboard lee lo guardado: es instantáneo y no llama al LLM.
+  - Un periodo queda **"outdated"** cuando sus documentos ya no son los vigentes de la empresa para ese periodo (versión nueva aprobada, documento subido o borrado).
+- **Datos insuficientes:** si a la empresa le falta en un periodo el estado que un ratio necesita (por ejemplo, el balance de FY24), el ratio no se envía al motor. Queda `unavailable` con `missing_statements: ["balance_sheet"]` y el motivo *"Insufficient data: the balance sheet for 2024 hasn't been ingested for Pacifico."*. Nunca se muestra un 0.
+- **Valores atípicos** (`app/dashboard/outliers.py`, sin LLM):
+  - **Criterio:** un valor se marca si cambia más de `DASHBOARD_OUTLIER_REL_CHANGE` (50 %) respecto del periodo calculado anterior **y** además supera un mínimo absoluto: 5 puntos porcentuales en porcentajes (`DASHBOARD_OUTLIER_MIN_POINTS`) o 0.5x en múltiplos (`DASHBOARD_OUTLIER_MIN_TIMES`). Con 4 o más periodos también se usa un z-score robusto.
+  - **Causas:** el ROE se descompone con DuPont (margen neto × rotación de activos × multiplicador de capital) y el ROA con margen × rotación. Así se dice si el salto vino de la rentabilidad, la eficiencia o el apalancamiento. En los demás ratios se muestra el cambio de sus entradas.
+- **Acceso:** si el usuario no puede ver alguno de los documentos de un periodo calculado, ese periodo sale "restricted", sin valores, y el intento queda en la auditoría (`view_dashboard`, ID-HU-BE-014).
+- **Solo cifras consolidadas:** no hay filtro por segmento (decisión del plan).
+
+Endpoints:
+- `GET /dashboard/catalog`: empresas, con sus periodos y documentos.
+- `GET /dashboard?entity=Andina[&periods=2024&categories=solvency]`: el dashboard guardado. Por cada ratio trae `points[]` (un punto por periodo: `status`, `value`, `inputs[]`, `citations[]`, `cross_document`, `missing_statements`, `stale`, `outlier`) y `periods[]` (calculado, desactualizado, restringido, documentos y notas). Responde 404 si la empresa no existe.
+- `POST /dashboard/refresh`: `{"entity": "Andina", "periods": ["2024", "2025"]}`. Sin `periods`, calcula todos los del catálogo (hasta `DASHBOARD_MAX_PERIODS`). Tarda unos 20 s por periodo y responde 503 si el LLM no responde. Cada periodo se guarda apenas se calcula.
+- `POST /dashboard/export.xlsx`: el dashboard en pantalla, en tres hojas: ratios por periodo, entradas con sus citas, y atípicos con sus notas. El PDF es la impresión del navegador ("Save as PDF").
+
+Datos de demo: `docker compose exec api python scripts/seed_demo.py --refresh`. Genera, sube y clasifica los workbooks de demo y deja el dashboard calculado.
+
 ### Confidentialidad y control de acceso
 
 Los documentos y chunks nuevos se clasifican como `restricted` por defecto.
@@ -414,6 +442,14 @@ Docker Desktop sobre Windows, donde los bind mounts no reenvían eventos `inotif
   %, y la cita de cada valor (abre el panel de fuente); las filas que no
   concilian se resaltan en rojo con el equipo sugerido; botones "Export to
   Excel" y "Save as PDF".
+- **Dashboard (ID-HU-FE-004)**: pestaña "Dashboard",
+  `frontend/src/components/DashboardView.tsx` y `TrendChart.tsx`. También se
+  abre directo con `http://localhost:5173/?entity=Andina#dashboard`.
+  - **Filtros:** empresa, periodos (más uno escrito a mano), categorías y "Calculate".
+  - **Tarjetas clave:** ROE, ROA, EBITDA margin y current ratio, con la variación contra el periodo anterior y una mini-tendencia.
+  - **Detalle del ratio elegido:** gráfico de tendencia (SVG propio, con tooltip), recuadro de "Outlier" con la tabla de causas, y las fuentes del periodo agrupadas por documento (cada cita abre el panel de fuente).
+  - **Estados:** "Insufficient data" con el documento faltante, "Held for review", "outdated" y "restricted".
+  - "Export to Excel" y "Save as PDF".
 - **Ratios (ID-HU-BE-010)**: pestaña "Ratios",
   `frontend/src/components/RatiosView.tsx`.
   - **Entrada:** selector de estados (1 a 6), categorías y periodo opcional.
@@ -523,6 +559,8 @@ docker compose exec api pytest
 - `test_document_resolution.py` (integración, requiere Postgres) cubre
   ID-HU-FE-002: lectura de celda/fórmula, supersesión de versión, acceso
   restringido y descarga del archivo original.
+- `test_access_audit.py` cubre ID-HU-BE-014: registro de denegaciones (búsqueda, ratios, fuente y archivo), información privilegiada, que la denegación sobreviva al rollback, deduplicación por petición, filtros, paginación, CSV y el 403 de la auditoría. Las denegaciones se guardan en su propia sesión, así que cada test usa sus propios ids de usuario.
+- `test_dashboard.py` cubre ID-HU-FE-004: catálogo (empresa, periodos, estados), atípicos y causas, tendencia, datos insuficientes, varias fuentes, resultados guardados y desactualizados, acceso restringido y export a Excel. Ingesta real y extracción guionada.
 - `test_ratios.py` cubre ID-HU-BE-010.
   - **Sin base ni LLM** (extractor falso): cada fórmula contra estados de
     ejemplo, el mapeo de etiquetas, los ratios entre documentos, los ratios
@@ -553,10 +591,16 @@ backend/app/
                             # ConversationSession, ConversationMessage
   versioning.py             # ID-HU-BE-015: grupos de versiones, aprobación, versión por defecto
   escalation.py             # ID-HU-BE-009: tema -> equipo de escalamiento (lo reutiliza FE-003)
+  audit.py                  # ID-HU-BE-014: registro de accesos permitidos/denegados + contexto por petición
   figures/
     extraction.py           # ID-HU-FE-003: extract_figure (compartido con BE-010) + tasas de cambio documentadas
     comparison.py             # variaciones, conciliación, monedas (aritmética determinística)
     export.py                   # Excel de la comparación
+  dashboard/                # ID-HU-FE-004
+    catalog.py                # empresas, periodos y estados de cada documento (sin LLM)
+    service.py                # refresh (calcula y guarda) / get_dashboard (lee, atípicos, desactualizados)
+    outliers.py               # detección de atípicos y causas (DuPont)
+    export.py                 # Excel del dashboard
   ratios/                   # ID-HU-BE-010
     formulas.py               # librería de ratios y líneas de los estados (sinónimos en/es)
     mapping.py                # ¿la etiqueta encontrada es la entrada de la fórmula? + pistas de estado
@@ -582,6 +626,7 @@ backend/app/
     routes_ingest.py           # POST /ingest
     routes_query.py              # POST /query, POST /query/answer, GET /documents/{id}/pdf-structure
     routes_compare.py              # POST /compare, POST /compare/export.xlsx
+    routes_audit.py                # GET /audit/access-logs (+ export.csv), solo admin (ID-HU-BE-014)
     routes_documents.py            # GET /documents/{id}/resolve, /cells/{sheet}/{address}, /file,
                                     # /versions, POST /approve, /supersede, PATCH /confidentiality
 
@@ -609,4 +654,32 @@ X-User-Role: compensation-access
 A user with `compensation-access` can retrieve `restricted:compensation` but not `restricted:legal-contingencies`. A `financial-controller` is mapped to compensation, related-party, and legal-contingency access. Retrieved sources, including authorized restricted sources, are persisted in `retrieval_audit_logs` with user identity, roles, document/chunk IDs, confidentiality tier, question, authorization status, and timestamp.
 
 The audit table intentionally stores document/chunk IDs without foreign keys so audit history survives deletion of the source content.
+
+### Auditoría de accesos denegados (ID-HU-BE-014)
+
+Todo intento de acceso queda en `retrieval_audit_logs`, **permitido o denegado**, con usuario, roles, fecha y hora, documento (id y nombre), chunk (si aplica), nivel de confidencialidad, motivo, origen y la pregunta. El registro lo escribe `app/audit.py`.
+
+- **Qué se registra como denegado:**
+  - **Búsqueda:** las coincidencias relevantes que el rol excluye. Siempre se aplica `RETRIEVAL_MIN_SCORE`, también en la extracción de cifras, así que una pregunta sin relación no genera denegaciones.
+  - **Lectura directa de una fila:** las filas que leen la extracción de cifras y el chat (`lookup`), y los precedentes de una fórmula.
+  - **Documento de ratios o de `/compare` con nivel restringido** (`extract`).
+  - **Fuente citada o archivo:** abrir una fuente en `/resolve`, `/cells` o `/file` (`resolve`, `view_cell`, `view_file`, sin chunk).
+  - **Auditoría:** consultar el registro sin ser admin (`audit_query`).
+- **Las denegaciones se guardan aparte:** se escriben en su propia sesión y con commit inmediato, así que quedan registradas aunque la petición falle después (por ejemplo, un 503 del LLM). Si escribir el registro falla, el acceso sigue denegado.
+- **Contexto por petición:** cada petición tiene un `request_id` y un `resource` (`chat`, `query`, `ratios`, `compare`, `resolve`, `cells`, `file`, `audit`), que asigna `AuditContextMiddleware`. Los hilos de ratios heredan ese contexto. Dentro de una petición, la misma denegación se registra una sola vez; la búsqueda bilingüe, por ejemplo, busca dos veces.
+- **Quién es:** `X-User-Id` (en `/file`, también `?user=`). El frontend lo envía desde el campo "User" del encabezado.
+
+**Información privilegiada no publicada:**
+- Etiqueta `restricted:insider`. También se aceptan "Pre-release: Insider", "insider" y "pre-release".
+- Requiere el permiso `insider-access`, que tiene el rol `pre-release-disclosure` (el grupo de divulgación previa).
+- **Es más estricta que el resto:** `restricted-access` (de `restricted-reviewer`) no alcanza, ni el `financial-controller`. `admin` sí accede, y queda registrado.
+- Cada evento sobre ese contenido lleva `is_insider=true`. La respuesta del chat no incluye ninguna cifra y muestra el aviso genérico de información restringida.
+- Al publicarse los resultados, la etiqueta se cambia a mano con `PATCH /documents/{id}/confidentiality`.
+
+**Consulta para administradores** (cualquier otro rol recibe `403`, y ese intento también queda registrado):
+- `GET /audit/access-logs`: filtros `user_id`, `document_id`, `document` (parte del nombre), `from`, `to` (ISO 8601), `authorized` (`true`/`false`), `tier`, `insider_only` y `resource`; paginación `limit` (máximo 500) y `offset`. Ordenado del más reciente al más antiguo, con `total`.
+- `GET /audit/access-logs/export.csv`: los mismos filtros, en CSV. Las celdas que empiezan con `=`, `+`, `-` o `@` se escapan para que una hoja de cálculo no las evalúe.
+- En el frontend, la pestaña **Audit** solo aparece con el rol `admin`.
+
+La migración `0013_access_audit` agrega las columnas nuevas y completa `document_filename` en los registros que ya existían.
 

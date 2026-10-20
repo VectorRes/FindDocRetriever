@@ -24,6 +24,8 @@ const CONFIDENTIALITY_OPTIONS = [
   "restricted:compensation",
   "restricted:related-parties",
   "restricted:legal",
+  // ID-HU-BE-014: pre-release results, only for the pre-release disclosure group.
+  "restricted:insider",
 ];
 
 // ID-HU-BE-015: where a version stands in its group. A newer draft that
@@ -40,6 +42,7 @@ function versionState(doc: DocumentOut): { label: string; style: { background: s
 function confidentialityStyle(tag: string): { background: string; color: string } {
   if (tag === "public") return { background: "#f0fdf4", color: "#15803d" };
   if (tag === "internal") return { background: "#eff6ff", color: "#1d4ed8" };
+  if (tag === "restricted:insider") return { background: "#fef2f2", color: "#b91c1c" };
   return { background: "#fef3c7", color: "#92400e" };
 }
 

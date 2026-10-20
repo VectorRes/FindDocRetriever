@@ -231,3 +231,127 @@ export interface RatioReport {
   line_items: RatioInput[];
   notes: string[];
 }
+
+// ID-HU-BE-014: one access attempt in the audit trail.
+export interface AuditLog {
+  id: string;
+  occurred_at: string;
+  user_id: string;
+  roles: string[];
+  // retrieve | lookup | extract | resolve | view_cell | view_file | audit_query
+  action: string;
+  // Where it came from: chat, query, ratios, compare, resolve, cells, file, audit…
+  resource: string;
+  document_id: string | null;
+  document_filename: string | null;
+  chunk_id: string | null;
+  confidentiality_tag: string;
+  authorized: boolean;
+  is_insider: boolean;
+  question: string;
+  reason: string | null;
+  request_id: string | null;
+}
+
+export interface AuditLogPage {
+  total: number;
+  limit: number;
+  offset: number;
+  items: AuditLog[];
+}
+
+export interface AuditFilters {
+  user_id?: string;
+  document?: string;
+  from?: string; // ISO date-time
+  to?: string;
+  outcome?: "all" | "granted" | "denied";
+  tier?: string;
+  insider_only?: boolean;
+  resource?: string;
+}
+
+// ID-HU-FE-004: key financial figures and ratios dashboard.
+export type Statement = "income_statement" | "balance_sheet";
+
+export interface CatalogDocument {
+  id: string;
+  filename: string;
+  statements: Statement[]; // empty = couldn't tell
+  periods: string[]; // empty = couldn't tell
+}
+
+export interface CatalogEntity {
+  entity: string;
+  key: string;
+  periods: string[]; // chronological
+  documents: CatalogDocument[];
+}
+
+export interface DashboardCatalog {
+  entities: CatalogEntity[];
+}
+
+export interface Driver {
+  name: string;
+  previous: number | null;
+  current: number | null;
+  unit: "percent" | "times" | "amount";
+  change: number | null; // relative: 0.5 = +50%
+  note: string | null; // "leverage", "profitability"… for DuPont components
+}
+
+export interface Outlier {
+  previous_period: string | null;
+  previous_value: number | null;
+  change: number | null;
+  absolute_change: number | null;
+  method: "period_change" | "robust_z";
+  message: string;
+  drivers: Driver[];
+}
+
+export type PointStatus = "calculated" | "needs_review" | "unavailable" | "not_calculated" | "restricted";
+
+export interface DashboardPoint {
+  period: string;
+  status: PointStatus;
+  value: number | null;
+  currency: string | null;
+  inputs: RatioInput[];
+  citations: CitationOut[];
+  cross_document: boolean;
+  reasons: string[];
+  missing_statements: Statement[];
+  stale: boolean;
+  outlier: Outlier | null;
+}
+
+export interface DashboardRatio {
+  key: string;
+  name: string;
+  category: RatioCategory;
+  formula: string;
+  unit: "percent" | "times";
+  description: string;
+  points: DashboardPoint[]; // one per period, chronological
+}
+
+export interface DashboardPeriod {
+  period: string;
+  calculated: boolean;
+  stale: boolean;
+  restricted: boolean;
+  computed_at: string | null;
+  computed_by: string | null;
+  documents: { id: string; filename: string }[];
+  notes: string[];
+}
+
+export interface Dashboard {
+  entity: string;
+  entity_key: string;
+  periods: DashboardPeriod[];
+  ratios: DashboardRatio[];
+  notes: string[];
+}

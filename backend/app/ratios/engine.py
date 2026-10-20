@@ -15,6 +15,7 @@
 The model is only involved inside `extract_figure` (one call per input and
 document tried), whose values are verified to appear in their source.
 """
+import contextvars
 import re
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -303,8 +304,11 @@ def map_line_items(
     if session_factory is None or max_workers <= 1:
         lookups = [lookup(item) for item in items]
     else:
+        # Each worker runs in a copy of this request's context, so its audit
+        # entries keep the request's id and resource (app/audit.py).
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            lookups = list(pool.map(lookup, items))
+            futures = [pool.submit(contextvars.copy_context().run, lookup, item) for item in items]
+            lookups = [future.result() for future in futures]
 
     attempts = sum(found.attempts for found in lookups)
     if attempts and sum(found.errors for found in lookups) == attempts:

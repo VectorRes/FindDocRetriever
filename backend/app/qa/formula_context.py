@@ -18,7 +18,8 @@ from openpyxl.utils import coordinate_to_tuple, range_boundaries
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import Cell, Chunk, NamedRange, RetrievalAuditLog, Sheet
+from app.audit import Denial, record_denials, record_granted
+from app.db.models import Cell, Chunk, NamedRange, Sheet
 from app.qa.query_expansion import is_spanish
 from app.retrieval.access import can_access, parse_roles
 from app.retrieval.service import RetrievedChunk
@@ -255,6 +256,7 @@ def add_formula_precedents(
     roles = parse_roles(user_roles)
     seen = {chunk.chunk_id for chunk in chunks}
     added: list[RetrievedChunk] = []
+    denied: list[Denial] = []
     for chunk in chunks:
         if len(added) >= MAX_PRECEDENTS:
             break
@@ -264,22 +266,23 @@ def add_formula_precedents(
             precedent = _chunk_covering(db, chunk.document_id, sheet, row, column)
             if precedent is None or str(precedent.id) in seen:
                 continue
-            if not can_access(precedent.confidentiality_tag, roles):
-                continue
             seen.add(str(precedent.id))
+            if not can_access(precedent.confidentiality_tag, roles):
+                # ID-HU-BE-014: the formula relies on a section the user can't see.
+                denied.append(Denial(
+                    document_id=precedent.document_id, document_filename=chunk.document_filename,
+                    chunk_id=precedent.id, tag=precedent.confidentiality_tag, action="lookup",
+                ))
+                continue
             added.append(_to_retrieved(precedent, note))
-            db.add(RetrievalAuditLog(
-                user_id=user_id or "anonymous",
-                roles=sorted(roles),
-                action="retrieve",
-                document_id=precedent.document_id,
-                chunk_id=precedent.id,
-                confidentiality_tag=precedent.confidentiality_tag,
-                authorized=True,
-                question=question,
-            ))
+            record_granted(
+                db, user_id=user_id, roles=roles, document_id=precedent.document_id, chunk_id=precedent.id,
+                document_filename=chunk.document_filename, tag=precedent.confidentiality_tag,
+                question=question, action="lookup",
+            )
             if len(added) >= MAX_PRECEDENTS:
                 break
     if added:
         db.flush()
+    record_denials(user_id=user_id, roles=roles, denials=denied, question=question)
     return chunks + added

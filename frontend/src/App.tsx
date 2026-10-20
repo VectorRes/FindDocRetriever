@@ -1,24 +1,35 @@
 import { useEffect, useState } from "react";
 import {
   APPROVER_ROLES,
+  AUDITOR_ROLES,
   CLASSIFIER_ROLES,
   USER_ROLES,
   getHealth,
+  getUserId,
   getUserRole,
+  setUserId,
   setUserRole,
 } from "./api/client";
 import type { UserRole } from "./api/client";
 import type { CitationOut, DocumentOut } from "./api/types";
+import AuditView from "./components/AuditView";
 import Chat from "./components/Chat";
 import ComparisonView from "./components/ComparisonView";
+import DashboardView from "./components/DashboardView";
 import DocumentList from "./components/DocumentList";
 import RatiosView from "./components/RatiosView";
 import SourceVerificationPanel from "./components/SourceVerificationPanel";
 
 type ApiStatus = "checking" | "online" | "offline";
-type View = "chat" | "compare" | "ratios";
+type View = "chat" | "compare" | "ratios" | "dashboard" | "audit";
 
-const VIEW_LABELS: Record<View, string> = { chat: "Chat", compare: "Compare", ratios: "Ratios" };
+const VIEW_LABELS: Record<View, string> = {
+  chat: "Chat",
+  compare: "Compare",
+  ratios: "Ratios",
+  dashboard: "Dashboard",
+  audit: "Audit",
+};
 
 // "Save as PDF" on the comparison (ID-HU-FE-003) uses the browser's print
 // dialog: everything marked .no-print is left out of the printout.
@@ -27,21 +38,35 @@ const PRINT_CSS = `@media print {
   main { padding: 0 !important; }
 }`;
 
+// A view can be opened directly: http://localhost:5173/#dashboard
+function viewFromHash(): View {
+  const hash = window.location.hash.replace("#", "");
+  return hash in VIEW_LABELS ? (hash as View) : "chat";
+}
+
 export default function App() {
   const [apiStatus, setApiStatus] = useState<ApiStatus>("checking");
   const [selectedCitation, setSelectedCitation] = useState<CitationOut | null>(null);
   const [documentsOpen, setDocumentsOpen] = useState(false);
   const [role, setRole] = useState<UserRole>(getUserRole());
+  const [userId, setUserIdState] = useState(getUserId());
   // ID-HU-BE-015: a specific version the chat is scoped to (e.g. superseded, for audit).
   const [pinnedDocument, setPinnedDocument] = useState<DocumentOut | null>(null);
-  const [view, setView] = useState<View>("chat");
+  const [view, setView] = useState<View>(viewFromHash);
 
   function changeRole(next: UserRole) {
     setUserRole(next);
     setRole(next);
     // The open source panel was resolved under the previous role's access.
     setSelectedCitation(null);
+    if (!AUDITOR_ROLES.includes(next)) setView((current) => (current === "audit" ? "chat" : current));
   }
+
+  // ID-HU-BE-014: the audit trail tab is only offered to administrators.
+  const canAudit = AUDITOR_ROLES.includes(role);
+  const views: View[] = canAudit
+    ? ["chat", "compare", "ratios", "dashboard", "audit"]
+    : ["chat", "compare", "ratios", "dashboard"];
 
   useEffect(() => {
     getHealth()
@@ -65,11 +90,14 @@ export default function App() {
         <div style={{ display: "flex", gap: "1.25rem", alignItems: "baseline" }}>
           <h1 style={{ fontSize: "1.4rem", margin: 0 }}>FinDoc Retriever</h1>
           <nav aria-label="Views" style={{ display: "flex", gap: "0.25rem" }}>
-            {(["chat", "compare", "ratios"] as const).map((v) => (
+            {views.map((v) => (
               <button
                 key={v}
                 type="button"
-                onClick={() => setView(v)}
+                onClick={() => {
+                  setView(v);
+                  window.history.replaceState(null, "", `#${v}`);
+                }}
                 aria-pressed={view === v}
                 style={tabStyle(view === v)}
               >
@@ -79,6 +107,19 @@ export default function App() {
           </nav>
         </div>
         <div style={{ display: "flex", gap: "1rem", alignItems: "center" }}>
+          <label style={{ fontSize: "0.85rem", color: "#334155", display: "flex", gap: "0.4rem", alignItems: "center" }}>
+            User
+            <input
+              value={userId}
+              onChange={(e) => setUserIdState(e.target.value)}
+              onBlur={() => {
+                setUserId(userId);
+                setUserIdState(getUserId());
+              }}
+              aria-label="User id"
+              style={{ ...roleSelectStyle, width: "8rem" }}
+            />
+          </label>
           <label style={{ fontSize: "0.85rem", color: "#334155", display: "flex", gap: "0.4rem", alignItems: "center" }}>
             Role
             <select
@@ -117,6 +158,15 @@ export default function App() {
         <div className="no-print" hidden={view !== "ratios"} style={{ flex: 1, minWidth: 0 }}>
           <RatiosView onCitationClick={setSelectedCitation} active={view === "ratios"} />
         </div>
+        {/* ID-HU-FE-004: printable ("Save as PDF"); its controls are .no-print. */}
+        <div hidden={view !== "dashboard"} style={{ flex: 1, minWidth: 0 }}>
+          <DashboardView onCitationClick={setSelectedCitation} active={view === "dashboard"} />
+        </div>
+        {canAudit && (
+          <div className="no-print" hidden={view !== "audit"} style={{ flex: 1, minWidth: 0 }}>
+            <AuditView active={view === "audit"} />
+          </div>
+        )}
         {selectedCitation && (
           <SourceVerificationPanel
             citation={selectedCitation}

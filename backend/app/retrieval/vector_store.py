@@ -66,6 +66,24 @@ def similarity_search(
     stmt = stmt.order_by(distance).limit(top_k)
     return [(chunk, 1 - float(dist)) for chunk, dist in db.execute(stmt)]
 
+def inaccessible_matches(
+    db: Session,
+    query_embedding: list[float],
+    accessible_tags: set[str],
+    top_k: int,
+    document_id: UUID | None = None,
+    min_score: float | None = None,
+) -> list[Chunk]:
+    """Chunks among the nearest relevant matches that the user can't see
+    (ID-HU-BE-014 logs them as denied). Their text is never passed to QA."""
+    distance = Chunk.embedding.cosine_distance(query_embedding)
+    stmt = select(Chunk).where(_version_scope(document_id))
+    if min_score is not None:
+        stmt = stmt.where(distance <= 1 - min_score)
+    nearest = db.scalars(stmt.order_by(distance).limit(top_k)).all()
+    return [chunk for chunk in nearest if chunk.confidentiality_tag not in accessible_tags]
+
+
 def has_inaccessible_match(
     db: Session,
     query_embedding: list[float],
@@ -74,10 +92,4 @@ def has_inaccessible_match(
     document_id: UUID | None = None,
     min_score: float | None = None,
 ) -> bool:
-    # Check only the nearest relevant matches. Their text is never passed to QA.
-    distance = Chunk.embedding.cosine_distance(query_embedding)
-    stmt = select(Chunk.confidentiality_tag).where(_version_scope(document_id))
-    if min_score is not None:
-        stmt = stmt.where(distance <= 1 - min_score)
-    tags = db.scalars(stmt.order_by(distance).limit(top_k)).all()
-    return any(tag not in accessible_tags for tag in tags)
+    return bool(inaccessible_matches(db, query_embedding, accessible_tags, top_k, document_id, min_score))

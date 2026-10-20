@@ -27,6 +27,7 @@ from app.schemas import (
     DocumentResolutionOut,
     SupersedeRequest,
 )
+from app.audit import Denial, record_denials
 from app.storage import delete_document_file, get_document_file_path
 from app.retrieval.access import can_access, normalize_tag, parse_roles
 from app.versioning import (
@@ -79,9 +80,20 @@ def _get_document_or_404(db: Session, document_id: str) -> Document:
     return document
 
 
-def _check_access(document: Document, role: str) -> AccessDecision:
-    if can_access(document.confidentiality_tag, parse_roles(role)):
+def _check_access(
+    document: Document, role: str, user_id: str | None = None, action: str | None = None, detail: str = ""
+) -> AccessDecision:
+    """The access decision for `document`. With an `action`, a denial is
+    logged in the audit trail (ID-HU-BE-014)."""
+    roles = parse_roles(role)
+    if can_access(document.confidentiality_tag, roles):
         return AccessDecision(allowed=True)
+    if action is not None:
+        record_denials(
+            user_id=user_id, roles=roles, question=detail or document.filename,
+            denials=[Denial(document_id=document.id, document_filename=document.filename,
+                            tag=document.confidentiality_tag, action=action)],
+        )
     return AccessDecision(
         allowed=False,
         reason="This content is restricted. The required permission is not assigned to this user.",
@@ -92,6 +104,7 @@ def _check_access(document: Document, role: str) -> AccessDecision:
 def resolve_document(
     document_id: str,
     x_user_role: Annotated[str, Header(alias="X-User-Role")] = "analyst",
+    x_user_id: Annotated[str, Header(alias="X-User-Id")] = "anonymous",
     db: Session = Depends(get_db),
 ) -> DocumentResolutionOut:
     document = _get_document_or_404(db, document_id)
@@ -105,7 +118,8 @@ def resolve_document(
         document=document,
         is_superseded=is_superseded,
         current_version=current_version,
-        access=_check_access(document, x_user_role),
+        access=_check_access(document, x_user_role, x_user_id, action="resolve",
+                             detail=f"Open cited source: {document.filename}"),
     )
 
 
@@ -115,11 +129,13 @@ def get_cell(
     sheet_name: str,
     address: str,
     x_user_role: Annotated[str, Header(alias="X-User-Role")] = "analyst",
+    x_user_id: Annotated[str, Header(alias="X-User-Id")] = "anonymous",
     db: Session = Depends(get_db),
 ) -> CellOut:
     document = _get_document_or_404(db, document_id)
 
-    access = _check_access(document, x_user_role)
+    access = _check_access(document, x_user_role, x_user_id, action="view_cell",
+                           detail=f"View cell {sheet_name}!{address}")
     if not access.allowed:
         raise HTTPException(status_code=403, detail=access.reason)
 
@@ -148,17 +164,21 @@ def get_cell(
 def get_document_file(
     document_id: str,
     x_user_role: Annotated[str, Header(alias="X-User-Role")] = "analyst",
+    x_user_id: Annotated[str, Header(alias="X-User-Id")] = "anonymous",
     role: Annotated[str | None, Query()] = None,
+    user: Annotated[str | None, Query()] = None,
     db: Session = Depends(get_db),
 ) -> FileResponse:
     """Serves the original uploaded file — ID-HU-FE-002's "open original file"
     action, and what the PDF viewer embeds to show the real page.
 
-    `?role=` is accepted as an alternative to X-User-Role because the browser
-    loads this URL directly (iframe / link), which can't carry custom headers."""
+    `?role=` / `?user=` are accepted as alternatives to X-User-Role /
+    X-User-Id because the browser loads this URL directly (iframe / link),
+    which can't carry custom headers."""
     document = _get_document_or_404(db, document_id)
 
-    access = _check_access(document, role or x_user_role)
+    access = _check_access(document, role or x_user_role, user or x_user_id, action="view_file",
+                           detail=f"Open original file: {document.filename}")
     if not access.allowed:
         raise HTTPException(status_code=403, detail=access.reason)
 

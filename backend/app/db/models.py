@@ -205,10 +205,11 @@ class Chunk(Base):
 
 
 class RetrievalAuditLog(Base):
-    """Immutable audit event for content returned by retrieval.
+    """Immutable audit event for an access attempt (written by app/audit.py).
 
-    Restricted content is logged on successful authorized retrievals as well as
-    ordinary content, so legitimate access remains auditable.
+    Both granted and denied attempts are logged (ID-HU-BE-013/014): content
+    returned by retrieval, and content or documents the user's roles didn't
+    allow, so confidentiality controls are demonstrably enforced.
     """
 
     __tablename__ = "retrieval_audit_logs"
@@ -217,14 +218,25 @@ class RetrievalAuditLog(Base):
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     user_id: Mapped[str] = mapped_column(String(255), default="anonymous", nullable=False)
     roles: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    # What was attempted: "retrieve" (search), "lookup" (a statement row read
+    # directly), "resolve" / "view_cell" / "view_file" (a cited document), "extract"
+    # (a figure for ratios/compare), "audit_query".
     action: Mapped[str] = mapped_column(String(32), default="retrieve", nullable=False)
     # Kept as reference IDs rather than foreign keys so audit history survives
-    # document/chunk deletion.
-    document_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    chunk_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    # document/chunk deletion. No chunk for whole-document attempts.
+    document_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    chunk_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    # The filename at the time, so the trail can be filtered by name after deletion.
+    document_filename: Mapped[str | None] = mapped_column(String(512), nullable=True)
     confidentiality_tag: Mapped[str] = mapped_column(String(64), nullable=False)
     authorized: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_insider: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     question: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Where the attempt came from: chat, query, ratios, compare, resolve, cells, file, audit…
+    resource: Mapped[str] = mapped_column(String(32), default="retrieve", nullable=False)
+    # Groups the events of one API request.
+    request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class ConversationSession(Base):
@@ -259,3 +271,59 @@ class ConversationMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     session: Mapped["ConversationSession"] = relationship(back_populates="messages")
+
+
+class DashboardRun(Base):
+    """One calculation of an entity's ratios for one period (ID-HU-FE-004).
+
+    The dashboard reads these instead of recalculating (each calculation costs
+    model calls); a refresh replaces the run of that entity and period. A run
+    is stale when the documents it used are no longer the entity's current
+    documents for the period (a new version was approved, one was uploaded or
+    deleted)."""
+
+    __tablename__ = "dashboard_runs"
+    __table_args__ = (UniqueConstraint("entity_key", "period", name="uq_dashboard_run_entity_period"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    entity: Mapped[str] = mapped_column(String(255))
+    # Normalized entity name ("Andina S.A.S." and "Andina" -> "andina").
+    entity_key: Mapped[str] = mapped_column(String(255), index=True)
+    period: Mapped[str] = mapped_column(String(64))
+    # Chronological order of periods ("2024" -> "2024-5", "Q3 2026" -> "2026-3").
+    period_sort: Mapped[str] = mapped_column(String(16))
+    document_ids: Mapped[list] = mapped_column(JSON, default=list)
+    notes: Mapped[list] = mapped_column(JSON, default=list)
+    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    computed_by: Mapped[str] = mapped_column(String(255), default="anonymous")
+
+    snapshots: Mapped[list["RatioSnapshot"]] = relationship(
+        back_populates="run", cascade="all, delete-orphan", order_by="RatioSnapshot.position"
+    )
+
+
+class RatioSnapshot(Base):
+    """One ratio of a DashboardRun, as the ratio engine (BE-010) returned it,
+    with its inputs and citations so the dashboard can show sources without
+    extracting the figures again."""
+
+    __tablename__ = "ratio_snapshots"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("dashboard_runs.id", ondelete="CASCADE"), index=True)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    ratio_key: Mapped[str] = mapped_column(String(64))
+    category: Mapped[str] = mapped_column(String(32))
+    # "calculated" | "needs_review" | "unavailable"
+    status: Mapped[str] = mapped_column(String(32))
+    value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    currency: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    inputs: Mapped[list] = mapped_column(JSON, default=list)
+    citations: Mapped[list] = mapped_column(JSON, default=list)
+    cross_document: Mapped[bool] = mapped_column(Boolean, default=False)
+    reasons: Mapped[list] = mapped_column(JSON, default=list)
+    # Statements the ratio needs that the entity has no document for in this
+    # period ("balance_sheet"): shown as "insufficient data".
+    missing_statements: Mapped[list] = mapped_column(JSON, default=list)
+
+    run: Mapped["DashboardRun"] = relationship(back_populates="snapshots")

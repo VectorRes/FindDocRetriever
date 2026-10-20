@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.audit import Denial, record_denials, record_granted
 from app.db.models import Document, DocumentStatus
 from app.qa.confidence import match_figure, primary_reading
 from app.qa.llm import get_chat_model
@@ -187,7 +188,9 @@ _YEAR = re.compile(r"^\s*(fy\s*)?\d{4}\s*$|\b(fy\s*\d{2,4}|year|annual|año|anua
 
 _PERIOD_WORDING = re.compile(
     r"\b(as of|as at|for the|(?:three|six|nine|twelve) months ended|quarters? ended|year to date|year-to-date"
-    r"|years? ended|period ended|ended|at)\b",
+    r"|years? ended|period ended|ended|at"
+    # The accounting framework a column is prepared under ("NIIF-2024", "IFRS 2024") isn't part of the period.
+    r"|niif|ifrs|nif|us gaap|gaap|colgaap)\b",
     re.IGNORECASE,
 )
 
@@ -436,7 +439,7 @@ def _labelled_rows_with(
 ) -> dict[str, RetrievedChunk]:
     """PDF table rows of `document` that contain `value_text`, as extra
     sources ("R1", "R2"…), access-checked and audited like retrieval."""
-    from app.db.models import Chunk, RetrievalAuditLog
+    from app.db.models import Chunk
 
     if not value_text or not value_text.strip():
         return {}
@@ -458,13 +461,19 @@ def _as_sources(
     prefix: str, limit: int,
 ) -> dict[str, RetrievedChunk]:
     """Chunks looked up directly in the document, as sources ("R1"…),
-    access-checked and audited like retrieval."""
-    from app.db.models import RetrievalAuditLog
-
+    access-checked and audited like retrieval (ID-HU-BE-014: a row the
+    user's roles exclude is logged as a denied lookup)."""
     roles = parse_roles(user_roles)
     rows: dict[str, RetrievedChunk] = {}
+    denied: list[Denial] = []
     for chunk in chunks:
-        if len(rows) >= limit or not can_access(chunk.confidentiality_tag, roles):
+        if len(rows) >= limit:
+            continue
+        if not can_access(chunk.confidentiality_tag, roles):
+            denied.append(Denial(
+                document_id=chunk.document_id, document_filename=document.filename, chunk_id=chunk.id,
+                tag=chunk.confidentiality_tag, action="lookup",
+            ))
             continue
         rows[f"{prefix}{len(rows) + 1}"] = RetrievedChunk(
             chunk_id=str(chunk.id), document_id=str(chunk.document_id), document_filename=document.filename,
@@ -473,13 +482,14 @@ def _as_sources(
             confidence=chunk.confidence, confidence_label=chunk.confidence_label,
             confidentiality_tag=chunk.confidentiality_tag,
         )
-        db.add(RetrievalAuditLog(
-            user_id=user_id or "anonymous", roles=sorted(roles), action="retrieve",
-            document_id=chunk.document_id, chunk_id=chunk.id,
-            confidentiality_tag=chunk.confidentiality_tag, authorized=True, question=question,
-        ))
+        record_granted(
+            db, user_id=user_id, roles=roles, document_id=chunk.document_id, chunk_id=chunk.id,
+            document_filename=document.filename, tag=chunk.confidentiality_tag, question=question,
+            action="lookup",
+        )
     if rows:
         db.flush()
+    record_denials(user_id=user_id, roles=roles, denials=denied, question=question)
     return rows
 
 
@@ -724,11 +734,16 @@ def extract_figure(
     if document.status != DocumentStatus.ready.value:
         result.reason = "This document hasn't finished processing."
         return result
+    query = f"{metric} {period}" if period else metric
     if not can_access(document.confidentiality_tag, parse_roles(user_roles)):
+        record_denials(
+            user_id=user_id, roles=parse_roles(user_roles), question=query,
+            denials=[Denial(document_id=document.id, document_filename=document.filename,
+                            tag=document.confidentiality_tag, action="extract")],
+        )
         result.reason = "This document is restricted for your role."
         return result
 
-    query = f"{metric} {period}" if period else metric
     try:
         # No relevance floor: the document is already chosen, and the model
         # decides below whether the metric is there (a short metric name in

@@ -54,6 +54,14 @@ class Settings(BaseSettings):
     ratio_extraction_workers: int = 6
     # QA: also search each question in the other language (English <-> Spanish).
     query_translation: bool = True
+    # ID-HU-FE-004: a ratio is flagged as an outlier when it moves more than
+    # this share of its previous value (0.5 = 50%) and more than the minimum
+    # absolute change for its unit (5 percentage points, or 0.5x).
+    dashboard_outlier_rel_change: float = 0.5
+    dashboard_outlier_min_points: float = 0.05
+    dashboard_outlier_min_times: float = 0.5
+    # Most periods one dashboard refresh calculates (each costs model calls).
+    dashboard_max_periods: int = 8
 
     # Comma-separated list of origins allowed to call the API (the frontend dev server, etc.)
     cors_allowed_origins_raw: str = "http://localhost:5173"

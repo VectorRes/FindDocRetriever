@@ -3,10 +3,11 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from app.audit import Denial, record_denials, record_granted
 from app.config import get_settings
 from app.embeddings.factory import get_embedding_provider
 from app.retrieval.access import can_access, parse_roles
-from app.retrieval.vector_store import has_inaccessible_match, similarity_search
+from app.retrieval.vector_store import has_inaccessible_match, inaccessible_matches, similarity_search
 
 
 @dataclass
@@ -61,8 +62,9 @@ def retrieve(
     [query_embedding] = provider.embed([question])
     roles = parse_roles(user_roles)
     allowed_tags = _allowed_tags(db, roles)
+    limit = top_k or settings.retrieval_top_k
     matches = similarity_search(
-        db, query_embedding, top_k or settings.retrieval_top_k,
+        db, query_embedding, limit,
         accessible_tags=allowed_tags, document_id=document_id,
         min_score=_min_score(min_score),
     )
@@ -70,20 +72,30 @@ def retrieve(
 
     # Every returned source is an auditable retrieval. This deliberately logs
     # authorized restricted access too, not only denied attempts.
-    from app.db.models import RetrievalAuditLog
     for chunk in chunks:
-        db.add(RetrievalAuditLog(
-            user_id=user_id or "anonymous",
-            roles=sorted(roles),
-            action="retrieve",
-            document_id=chunk.document_id,
-            chunk_id=chunk.id,
-            confidentiality_tag=chunk.confidentiality_tag,
-            authorized=True,
-            question=question,
-        ))
+        record_granted(
+            db, user_id=user_id, roles=roles, document_id=chunk.document_id, chunk_id=chunk.id,
+            document_filename=chunk.document.filename, tag=chunk.confidentiality_tag, question=question,
+        )
     if chunks:
         db.flush()
+
+    # ID-HU-BE-014: content the question would have relied on but the user's
+    # roles exclude. Only relevant matches count — always with the relevance
+    # floor, even when the caller disabled it for its own results (figure
+    # extraction), so unrelated restricted content isn't logged on every query.
+    denied = inaccessible_matches(
+        db, query_embedding, allowed_tags, limit, document_id=document_id,
+        min_score=_min_score(min_score) or _min_score(None),
+    )
+    record_denials(
+        user_id=user_id, roles=roles, question=question,
+        denials=[
+            Denial(document_id=chunk.document_id, document_filename=chunk.document.filename,
+                   chunk_id=chunk.id, tag=chunk.confidentiality_tag)
+            for chunk in denied
+        ],
+    )
 
     return [
         RetrievedChunk(

@@ -353,3 +353,132 @@ class RatioDefinitionOut(BaseModel):
     unit: str
     description: str
     inputs: list[str]
+
+
+# --- ID-HU-BE-014: access audit trail -----------------------------------------
+
+class AuditLogOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    occurred_at: datetime
+    user_id: str
+    roles: list[str]
+    action: str
+    resource: str
+    document_id: UUID | None = None
+    document_filename: str | None = None
+    chunk_id: UUID | None = None
+    confidentiality_tag: str
+    authorized: bool
+    is_insider: bool
+    question: str
+    reason: str | None = None
+    request_id: str | None = None
+
+
+class AuditLogPage(BaseModel):
+    total: int
+    limit: int
+    offset: int
+    items: list[AuditLogOut]
+
+
+# --- ID-HU-FE-004: key ratios dashboard ------------------------------------------
+
+class CatalogDocumentOut(BaseModel):
+    id: UUID
+    filename: str
+    statements: list[str]  # "income_statement" | "balance_sheet"; empty = couldn't tell
+    periods: list[str]     # empty = couldn't tell
+
+
+class CatalogEntityOut(BaseModel):
+    entity: str
+    key: str
+    periods: list[str]  # chronological
+    documents: list[CatalogDocumentOut]
+
+
+class DashboardCatalogOut(BaseModel):
+    entities: list[CatalogEntityOut]
+
+
+class DashboardRefreshRequest(BaseModel):
+    entity: str = Field(min_length=1)
+    # Defaults to every period found in the entity's documents (most recent ones,
+    # up to DASHBOARD_MAX_PERIODS). "2024", "FY2024", "Q3 2026"…
+    periods: list[str] | None = None
+
+
+class DriverOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    name: str
+    previous: float | None = None
+    current: float | None = None
+    unit: str  # "percent" | "times" | "amount"
+    change: float | None = None
+    note: str | None = None
+
+
+class OutlierOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    previous_period: str | None = None
+    previous_value: float | None = None
+    change: float | None = None
+    absolute_change: float | None = None
+    method: str
+    message: str
+    drivers: list[DriverOut] = []
+
+
+class DashboardPointOut(BaseModel):
+    period: str
+    # calculated | needs_review | unavailable | not_calculated | restricted
+    status: str
+    value: float | None = None
+    currency: str | None = None
+    inputs: list[RatioInputOut] = []
+    citations: list[CitationOut] = []
+    cross_document: bool = False
+    reasons: list[str] = []
+    # Statements with no ingested document for this period ("balance_sheet").
+    missing_statements: list[str] = []
+    stale: bool = False
+    outlier: OutlierOut | None = None
+
+
+class DashboardRatioOut(BaseModel):
+    key: str
+    name: str
+    category: str
+    formula: str
+    unit: str
+    description: str
+    points: list[DashboardPointOut]
+
+
+class DashboardDocumentOut(BaseModel):
+    id: str
+    filename: str
+
+
+class DashboardPeriodOut(BaseModel):
+    period: str
+    calculated: bool
+    stale: bool = False
+    restricted: bool = False
+    computed_at: datetime | None = None
+    computed_by: str | None = None
+    documents: list[DashboardDocumentOut] = []
+    notes: list[str] = []
+
+
+class DashboardOut(BaseModel):
+    entity: str
+    entity_key: str
+    periods: list[DashboardPeriodOut]
+    ratios: list[DashboardRatioOut]
+    notes: list[str] = []

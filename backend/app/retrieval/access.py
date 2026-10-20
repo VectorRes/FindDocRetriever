@@ -7,6 +7,17 @@ RESTRICTED = "restricted"
 DEFAULT_TAG = RESTRICTED
 ADMIN_ROLES = {"admin", "administrator"}
 
+# ID-HU-BE-014: pre-release insider information (e.g. unpublished quarterly
+# results). Stricter than the other restricted categories: the generic
+# `restricted-access` doesn't cover it, only explicit `insider-access` (the
+# pre-release disclosure group) or an admin does.
+INSIDER = "restricted:insider"
+INSIDER_PERMISSION = "insider-access"
+_INSIDER_ALIASES = {
+    "insider", "pre-release", "prerelease", "pre-release:insider", "pre-release: insider",
+    "restricted:pre-release", "restricted:insider",
+}
+
 # Application roles map to permissions. A user may also send explicit permission
 # names (for example ``compensation-access``) in X-User-Role for backwards
 # compatibility with the existing prototype.
@@ -28,8 +39,9 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "legal-access",
     },
     "restricted-reviewer": {"public-access", "internal-access", "restricted-access"},
-    "admin": {"public-access", "internal-access", "restricted-access"},
-    "administrator": {"public-access", "internal-access", "restricted-access"},
+    "pre-release-disclosure": {"public-access", "internal-access", INSIDER_PERMISSION},
+    "admin": {"public-access", "internal-access", "restricted-access", INSIDER_PERMISSION},
+    "administrator": {"public-access", "internal-access", "restricted-access", INSIDER_PERMISSION},
 }
 
 def normalize_tag(tag: str | None) -> str:
@@ -38,6 +50,8 @@ def normalize_tag(tag: str | None) -> str:
         return DEFAULT_TAG
     if value in {PUBLIC, INTERNAL, RESTRICTED}:
         return value
+    if value in _INSIDER_ALIASES:
+        return INSIDER
     if value.startswith("restricted:"):
         category = value.split(":", 1)[1].strip()
         if category:
@@ -60,6 +74,7 @@ def required_permission(tag: str) -> str | None:
         "legal": "legal-access",
         "legal-contingencies": "legal-access",
         "legal_contingencies": "legal-access",
+        "insider": INSIDER_PERMISSION,
     }
     return aliases.get(category, f"{category}-access")
 
@@ -72,8 +87,15 @@ def permissions_for_roles(roles: Iterable[str]) -> set[str]:
     for role in role_set:
         permissions.update(ROLE_PERMISSIONS.get(role, set()))
     if role_set & ADMIN_ROLES:
-        permissions.add("restricted-access")
+        permissions.update({"restricted-access", INSIDER_PERMISSION})
     return permissions
+
+
+def is_insider(tag: str | None) -> bool:
+    try:
+        return normalize_tag(tag) == INSIDER
+    except ValueError:
+        return False
 
 
 def can_access(tag: str, roles: Iterable[str]) -> bool:
@@ -84,4 +106,13 @@ def can_access(tag: str, roles: Iterable[str]) -> bool:
     if tag == INTERNAL:
         return "internal-access" in permissions
     permission = required_permission(tag)
+    if tag == INSIDER:
+        return permission in permissions
     return permission in permissions or "restricted-access" in permissions
+
+
+def denial_reason(tag: str) -> str:
+    """Why `tag` was denied, for the audit trail."""
+    if normalize_tag(tag) == INSIDER:
+        return "Pre-release insider information: requires the pre-release disclosure group (insider-access)."
+    return f"Requires {required_permission(tag)}."

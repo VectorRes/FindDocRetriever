@@ -1,8 +1,12 @@
 import type {
   AnswerResponse,
+  AuditFilters,
+  AuditLogPage,
   CellOut,
   CompareRequest,
   Comparison,
+  Dashboard,
+  DashboardCatalog,
   DocumentListOut,
   DocumentOut,
   DocumentResolutionOut,
@@ -22,9 +26,15 @@ export const USER_ROLES = [
   "reviewer",
   "financial-controller",
   "restricted-reviewer",
+  // ID-HU-BE-014: the pre-release disclosure group (sees "restricted:insider").
+  "pre-release-disclosure",
   "admin",
 ] as const;
 export type UserRole = (typeof USER_ROLES)[number];
+
+// Roles that can read the access audit trail — mirrors ADMIN_ROLES in
+// app/retrieval/access.py, which the backend enforces.
+export const AUDITOR_ROLES: readonly UserRole[] = ["admin"];
 
 // Roles allowed to reclassify documents in the UI. The backend doesn't
 // enforce this yet — it's a UI-level guard until real auth exists.
@@ -65,8 +75,37 @@ export function setUserRole(role: UserRole): void {
   }
 }
 
+// Who is asking, for the audit trail (ID-HU-BE-014). Like the role, it's
+// taken at face value until real authentication exists.
+const USER_ID_STORAGE_KEY = "findoc.userId";
+const DEFAULT_USER_ID = "demo-user";
+let currentUserId: string = readStoredUserId();
+
+function readStoredUserId(): string {
+  try {
+    const stored = localStorage.getItem(USER_ID_STORAGE_KEY)?.trim();
+    if (stored) return stored;
+  } catch {
+    // Storage can be unavailable (private mode, tests) — fall back to the default.
+  }
+  return DEFAULT_USER_ID;
+}
+
+export function getUserId(): string {
+  return currentUserId;
+}
+
+export function setUserId(userId: string): void {
+  currentUserId = userId.trim() || DEFAULT_USER_ID;
+  try {
+    localStorage.setItem(USER_ID_STORAGE_KEY, currentUserId);
+  } catch {
+    // Not persisting the choice is fine; it still applies for this session.
+  }
+}
+
 function roleHeaders(): Record<string, string> {
-  return { "X-User-Role": currentRole };
+  return { "X-User-Role": currentRole, "X-User-Id": currentUserId };
 }
 
 // FastAPI errors come as {"detail": "..."}: show the message, not the JSON.
@@ -119,10 +158,13 @@ export function getCell(documentId: string, sheetName: string, address: string):
   );
 }
 
-// Loaded directly by the browser (iframe / link), so the role goes in the
-// query string instead of a header.
+// Loaded directly by the browser (iframe / link), so the role and user go in
+// the query string instead of headers.
 export function documentFileUrl(documentId: string): string {
-  return `${API_URL}/documents/${documentId}/file?role=${encodeURIComponent(currentRole)}`;
+  return (
+    `${API_URL}/documents/${documentId}/file?role=${encodeURIComponent(currentRole)}` +
+    `&user=${encodeURIComponent(currentUserId)}`
+  );
 }
 
 export function listDocuments(): Promise<DocumentListOut> {
@@ -287,4 +329,113 @@ export async function calculateRatios(request: RatioRequest): Promise<RatioRepor
   } finally {
     clearTimeout(timeout);
   }
+}
+
+// ID-HU-BE-014: the access audit trail (admins only; anyone else gets 403).
+function auditQuery(filters: AuditFilters, page?: { limit: number; offset: number }): string {
+  const params = new URLSearchParams();
+  if (filters.user_id?.trim()) params.set("user_id", filters.user_id.trim());
+  if (filters.document?.trim()) params.set("document", filters.document.trim());
+  if (filters.from) params.set("from", filters.from);
+  if (filters.to) params.set("to", filters.to);
+  if (filters.outcome === "granted") params.set("authorized", "true");
+  if (filters.outcome === "denied") params.set("authorized", "false");
+  if (filters.tier?.trim()) params.set("tier", filters.tier.trim());
+  if (filters.insider_only) params.set("insider_only", "true");
+  if (filters.resource) params.set("resource", filters.resource);
+  if (page) {
+    params.set("limit", String(page.limit));
+    params.set("offset", String(page.offset));
+  }
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+
+export async function listAccessLogs(
+  filters: AuditFilters,
+  page: { limit: number; offset: number }
+): Promise<AuditLogPage> {
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}/audit/access-logs${auditQuery(filters, page)}`, { headers: roleHeaders() });
+  } catch {
+    throw new ApiError("Could not reach the FinDoc Retriever API.", "network");
+  }
+  if (!res.ok) {
+    const detail = await readErrorDetail(res);
+    throw new ApiError(detail || `Audit query failed with status ${res.status}`, "http", res.status);
+  }
+  return (await res.json()) as AuditLogPage;
+}
+
+export async function exportAccessLogs(filters: AuditFilters): Promise<Blob> {
+  const res = await fetch(`${API_URL}/audit/access-logs/export.csv${auditQuery(filters)}`, {
+    headers: roleHeaders(),
+  });
+  if (!res.ok) {
+    const detail = await readErrorDetail(res);
+    throw new ApiError(detail || `Export failed with status ${res.status}`, "http", res.status);
+  }
+  return res.blob();
+}
+
+// ID-HU-FE-004: the ratios dashboard. Reading it is fast (stored results);
+// a refresh recalculates every period, one model call per input.
+const DASHBOARD_REFRESH_TIMEOUT_MS = 600_000;
+
+export function getDashboardCatalog(): Promise<DashboardCatalog> {
+  return getJson(`/dashboard/catalog`);
+}
+
+export async function getDashboard(entity: string): Promise<Dashboard> {
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}/dashboard?entity=${encodeURIComponent(entity)}`, { headers: roleHeaders() });
+  } catch {
+    throw new ApiError("Could not reach the FinDoc Retriever API.", "network");
+  }
+  if (!res.ok) {
+    const detail = await readErrorDetail(res);
+    throw new ApiError(detail || `Loading the dashboard failed with status ${res.status}`, "http", res.status);
+  }
+  return (await res.json()) as Dashboard;
+}
+
+export async function refreshDashboard(entity: string, periods?: string[]): Promise<Dashboard> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), DASHBOARD_REFRESH_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${API_URL}/dashboard/refresh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...roleHeaders() },
+      body: JSON.stringify({ entity, periods: periods && periods.length ? periods : null }),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const detail = await readErrorDetail(res);
+      throw new ApiError(detail || `The calculation failed with status ${res.status}`, "http", res.status);
+    }
+    return (await res.json()) as Dashboard;
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new ApiError("The calculation took too long to respond.", "timeout");
+    }
+    throw new ApiError("Could not reach the FinDoc Retriever API.", "network");
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// Excel export of the dashboard on screen (posted back, not recomputed).
+export async function exportDashboard(dashboard: Dashboard): Promise<Blob> {
+  const res = await fetch(`${API_URL}/dashboard/export.xlsx`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(dashboard),
+  });
+  if (!res.ok) {
+    throw new ApiError(`Export failed with status ${res.status}`, "http", res.status);
+  }
+  return res.blob();
 }
