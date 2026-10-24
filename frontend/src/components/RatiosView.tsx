@@ -224,8 +224,8 @@ function RatioCard({ ratio, reviewed, onConfirm, onCitationClick }: RatioCardPro
           </div>
         </div>
         <div style={{ fontSize: "1.3rem", fontWeight: 700, fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>
-          {ratio.status === "unavailable" ? (
-            <span style={{ fontSize: "0.85rem", color: "#64748b", fontWeight: 400 }}>can't be calculated</span>
+          {ratio.status === "not_calculable" ? (
+            <span style={{ fontSize: "0.85rem", color: "#64748b", fontWeight: 400 }}>not calculable</span>
           ) : heldForReview ? (
             <span style={{ fontSize: "0.85rem", color: "#b45309", fontWeight: 600 }}>held for review</span>
           ) : (
@@ -241,7 +241,7 @@ function RatioCard({ ratio, reviewed, onConfirm, onCitationClick }: RatioCardPro
             margin: "0.4rem 0 0",
             paddingLeft: "1.1rem",
             fontSize: "0.8rem",
-            color: ratio.status === "unavailable" ? "#475569" : "#b45309",
+            color: ratio.status === "not_calculable" ? "#475569" : "#b45309",
           }}
         >
           {ratio.reasons.map((reason) => (

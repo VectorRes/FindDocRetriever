@@ -1,16 +1,17 @@
 """ID-HU-BE-010: standard financial ratios from ingested statements."""
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.dashboard.service import DashboardError, get_trend
 from app.db.models import Document
 from app.db.session import SessionLocal, get_db
 from app.figures.extraction import ExtractionServiceError
 from app.ratios.engine import calculate_ratios
 from app.ratios.formulas import RATIOS
-from app.schemas import RatioDefinitionOut, RatioReportOut, RatioRequest
+from app.schemas import RatioDefinitionOut, RatioReportOut, RatioRequest, RatioTrendOut
 
 router = APIRouter()
 
@@ -27,6 +28,28 @@ def list_ratio_definitions() -> list[RatioDefinitionOut]:
     ]
 
 
+@router.get("/ratios/trend", response_model=RatioTrendOut)
+def ratio_trend(
+    entity: str,
+    ratio: str,
+    periods: Annotated[list[str] | None, Query()] = None,
+    x_user_role: Annotated[str, Header(alias="X-User-Role")] = "analyst",
+    x_user_id: Annotated[str, Header(alias="X-User-Id")] = "anonymous",
+    db: Session = Depends(get_db),
+) -> RatioTrendOut:
+    """ID-HU-BE-011: one ratio of `entity` across its stored periods (POST
+    /dashboard/refresh stores them), in chronological order with the sources
+    of each value. A period it couldn't be calculated for — an input or a
+    statement missing, or no document at all for that quarter or year — is
+    returned as `not_calculable` with its `missing_inputs`, never omitted."""
+    try:
+        return get_trend(db, entity, ratio, periods=periods, user_roles=x_user_role, user_id=x_user_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except DashboardError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/ratios", response_model=RatioReportOut)
 def compute_ratios(
     request: RatioRequest,
@@ -41,7 +64,8 @@ def compute_ratios(
 
     Ratios whose inputs were mapped to non-standard labels come back as
     `needs_review`; ones missing an input, mixing currencies or dividing by
-    zero come back as `unavailable` with the reason."""
+    zero come back as `not_calculable` with the reason, and the inputs that
+    weren't found in `missing_inputs` (ID-HU-BE-011)."""
     if len(set(request.document_ids)) != len(request.document_ids):
         raise HTTPException(status_code=400, detail="Each document can only be selected once.")
 

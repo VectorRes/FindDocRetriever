@@ -222,7 +222,7 @@ def test_ratio_extraction_from_an_insider_document_is_logged(client, make_docume
 
     assert response.status_code == 200
     [ratio] = response.json()["ratios"]
-    assert ratio["status"] == "unavailable" and ratio["value"] is None
+    assert ratio["status"] == "not_calculable" and ratio["value"] is None
     events = _logs(user_id=user, document_id=document.id)
     assert events and all(not e.authorized and e.is_insider for e in events)
     # Looked up in worker threads, still tied to the request.

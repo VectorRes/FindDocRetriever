@@ -6,7 +6,7 @@ import type { DashboardPoint } from "../api/types";
 function point(period: string, value: number | null, extra: Partial<DashboardPoint> = {}): DashboardPoint {
   return {
     period,
-    status: value == null ? "unavailable" : "calculated",
+    status: value == null ? "not_calculable" : "calculated",
     value,
     currency: null,
     inputs: [],
@@ -14,6 +14,7 @@ function point(period: string, value: number | null, extra: Partial<DashboardPoi
     cross_document: false,
     reasons: [],
     missing_statements: [],
+    missing_inputs: [],
     stale: false,
     outlier: null,
     ...extra,
@@ -33,7 +34,7 @@ const OUTLIER = {
 describe("TrendChart", () => {
   it("describes every period, values and gaps, for screen readers", () => {
     render(<TrendChart points={[point("Q1", 0.12), point("Q2", null), point("Q3", 0.15)]} unit="percent" title="ROE" />);
-    expect(screen.getByRole("img")).toHaveAccessibleName("ROE: Q1 12.0%, Q2 insufficient data, Q3 15.0%");
+    expect(screen.getByRole("img")).toHaveAccessibleName("ROE: Q1 12.0%, Q2 not calculable, Q3 15.0%");
     expect(screen.getByText("n/a")).toBeInTheDocument();
   });
 

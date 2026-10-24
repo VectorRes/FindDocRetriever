@@ -9,7 +9,7 @@ Deterministic, no model:
   3.5% isn't an alarm but ROE 12% -> 34% is. With four or more points, a value
   far from the series' median (robust z-score over 3.5, median/MAD) is
   flagged too. Only "calculated" values are compared: ones held for review or
-  unavailable are left out of the trend.
+  not calculable are left out of the trend.
 - **Drivers.** For ROE the DuPont decomposition, ROE = net margin x asset
   turnover x equity multiplier (equity multiplier = ROE / ROA = total assets
   / equity), says whether profitability, efficiency or leverage moved it; ROA

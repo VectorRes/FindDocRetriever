@@ -323,7 +323,7 @@ class RatioOut(BaseModel):
     formula: str
     unit: str  # "percent" (value is a fraction) | "times"
     description: str
-    status: str  # "calculated" | "needs_review" | "unavailable"
+    status: str  # "calculated" | "needs_review" | "not_calculable"
     value: float | None = None
     inputs: list[RatioInputOut]
     citations: list[CitationOut]
@@ -331,6 +331,8 @@ class RatioOut(BaseModel):
     currency: str | None = None
     period: str | None = None
     reasons: list[str] = []
+    # Inputs that weren't found, by name, when status is "not_calculable".
+    missing_inputs: list[str] = []
 
 
 class RatioReportOut(BaseModel):
@@ -436,7 +438,10 @@ class OutlierOut(BaseModel):
 
 class DashboardPointOut(BaseModel):
     period: str
-    # calculated | needs_review | unavailable | not_calculated | restricted
+    # calculated | needs_review | not_calculable | not_calculated | restricted.
+    # not_calculable: the ratio can't be calculated for this period (an input
+    # or a whole statement is missing, see missing_inputs and reasons);
+    # not_calculated: the period has documents but hasn't been refreshed yet.
     status: str
     value: float | None = None
     currency: str | None = None
@@ -446,6 +451,8 @@ class DashboardPointOut(BaseModel):
     reasons: list[str] = []
     # Statements with no ingested document for this period ("balance_sheet").
     missing_statements: list[str] = []
+    # Inputs missing for this period, by name ("Current liabilities").
+    missing_inputs: list[str] = []
     stale: bool = False
     outlier: OutlierOut | None = None
 
@@ -468,6 +475,9 @@ class DashboardDocumentOut(BaseModel):
 class DashboardPeriodOut(BaseModel):
     period: str
     calculated: bool
+    # No document of the entity covers this period: a gap in its history,
+    # shown so it isn't read as a zero or skipped over (ID-HU-BE-011).
+    gap: bool = False
     stale: bool = False
     restricted: bool = False
     computed_at: datetime | None = None
@@ -481,4 +491,21 @@ class DashboardOut(BaseModel):
     entity_key: str
     periods: list[DashboardPeriodOut]
     ratios: list[DashboardRatioOut]
+    notes: list[str] = []
+
+
+class RatioTrendOut(BaseModel):
+    """One ratio of an entity over its periods, oldest first (ID-HU-BE-011).
+    Every period appears, gaps included, each with its sources or the reason
+    it couldn't be calculated."""
+
+    entity: str
+    entity_key: str
+    key: str
+    name: str
+    category: str
+    formula: str
+    unit: str
+    description: str
+    points: list[DashboardPointOut]
     notes: list[str] = []

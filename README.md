@@ -330,8 +330,10 @@ documentos, en la versión por defecto de cada uno:
     - una entrada no corresponde al periodo pedido (`period_coverage` de FE-003);
     - un saldo que nunca es negativo sale negativo (p. ej. patrimonio negativo);
     - el resultado sale del rango plausible (p. ej. un margen > 100 %).
-  - `unavailable`: falta una entrada, las monedas son distintas o el
-    denominador es cero.
+  - `not_calculable`: falta una entrada, las monedas son distintas o el
+    denominador es cero. Si falta una entrada, `missing_inputs` la nombra
+    (p. ej. `["Current liabilities"]`); nunca se devuelve un valor vacío ni
+    un 0 (ID-HU-BE-011).
   Detalles de funcionamiento:
   - Cuando todas las entradas salen del mismo documento, el ratio usa las
     cifras tal como están escritas: la escala del documento se cancela, así que
@@ -355,7 +357,14 @@ Muestra los ratios de liquidez, solvencia, rentabilidad y eficiencia de cada emp
   - "Calculate" ejecuta `calculate_ratios` por periodo, con los documentos de la empresa para ese periodo, y guarda cada ratio con sus entradas y citas.
   - Abrir el dashboard lee lo guardado: es instantáneo y no llama al LLM.
   - Un periodo queda **"outdated"** cuando sus documentos ya no son los vigentes de la empresa para ese periodo (versión nueva aprobada, documento subido o borrado).
-- **Datos insuficientes:** si a la empresa le falta en un periodo el estado que un ratio necesita (por ejemplo, el balance de FY24), el ratio no se envía al motor. Queda `unavailable` con `missing_statements: ["balance_sheet"]` y el motivo *"Insufficient data: the balance sheet for 2024 hasn't been ingested for Pacifico."*. Nunca se muestra un 0.
+- **Datos insuficientes:** si a la empresa le falta en un periodo el estado que un ratio necesita (por ejemplo, el balance de FY24), el ratio no se envía al motor. Queda `not_calculable` con `missing_statements: ["balance_sheet"]`, las entradas de ese estado en `missing_inputs` y el motivo *"Insufficient data: the balance sheet for 2024 hasn't been ingested for Pacifico."*. Nunca se muestra un 0.
+
+### Ratios por periodo y tendencias (ID-HU-BE-011)
+
+- **Guardado por periodo:** cada "Calculate" (`POST /dashboard/refresh`) guarda un `ratio_snapshot` por ratio y periodo, con su valor, entradas y citas.
+- **"Not calculable":** un ratio que no se puede calcular queda `not_calculable`, con `missing_inputs` (los nombres de las entradas que faltan, p. ej. `["Current liabilities"]`) y el motivo. Se guarda en la columna `ratio_snapshots.missing_inputs` (migración `0015_ratio_missing_inputs`, que también pasa los `unavailable` ya guardados a `not_calculable`).
+- **Huecos en la historia:** los trimestres o años sin documento entre el primer y el último periodo de la empresa (Q3 entre Q2 y Q4) aparecen igual, como `not_calculable` y con `periods[].gap = true`. Nunca se omiten ni se muestran como 0. Solo se rellenan los huecos entre los `DASHBOARD_MAX_PERIODS` periodos más recientes, así unos documentos de 2010 y 2025 no generan catorce años vacíos.
+- `GET /ratios/trend?entity=Andina&ratio=ebitda_margin[&periods=Q1 2024&periods=Q2 2024]`: un ratio de la empresa en orden cronológico. Cada punto trae `status`, `value`, `citations[]` (las fuentes), `missing_inputs` y `reasons`. Lee lo guardado, sin llamar al LLM. Responde 400 si el ratio no existe y 404 si la empresa no existe.
 - **Valores atípicos** (`app/dashboard/outliers.py`, sin LLM):
   - **Criterio:** un valor se marca si cambia más de `DASHBOARD_OUTLIER_REL_CHANGE` (50 %) respecto del periodo calculado anterior **y** además supera un mínimo absoluto: 5 puntos porcentuales en porcentajes (`DASHBOARD_OUTLIER_MIN_POINTS`) o 0.5x en múltiplos (`DASHBOARD_OUTLIER_MIN_TIMES`). Con 4 o más periodos también se usa un z-score robusto.
   - **Causas:** el ROE se descompone con DuPont (margen neto × rotación de activos × multiplicador de capital) y el ROA con margen × rotación. Así se dice si el salto vino de la rentabilidad, la eficiencia o el apalancamiento. En los demás ratios se muestra el cambio de sus entradas.
@@ -448,7 +457,7 @@ Docker Desktop sobre Windows, donde los bind mounts no reenvían eventos `inotif
   - **Filtros:** empresa, periodos (más uno escrito a mano), categorías y "Calculate".
   - **Tarjetas clave:** ROE, ROA, EBITDA margin y current ratio, con la variación contra el periodo anterior y una mini-tendencia.
   - **Detalle del ratio elegido:** gráfico de tendencia (SVG propio, con tooltip), recuadro de "Outlier" con la tabla de causas, y las fuentes del periodo agrupadas por documento (cada cita abre el panel de fuente).
-  - **Estados:** "Insufficient data" con el documento faltante, "Held for review", "outdated" y "restricted".
+  - **Estados:** "Not calculable" con el documento o la línea faltante ("Missing input: Current liabilities"), "Held for review", "outdated" y "restricted".
   - "Export to Excel" y "Save as PDF".
 - **Ratios (ID-HU-BE-010)**: pestaña "Ratios",
   `frontend/src/components/RatiosView.tsx`.
@@ -561,6 +570,7 @@ docker compose exec api pytest
   restringido y descarga del archivo original.
 - `test_access_audit.py` cubre ID-HU-BE-014: registro de denegaciones (búsqueda, ratios, fuente y archivo), información privilegiada, que la denegación sobreviva al rollback, deduplicación por petición, filtros, paginación, CSV y el 403 de la auditoría. Las denegaciones se guardan en su propia sesión, así que cada test usa sus propios ids de usuario.
 - `test_dashboard.py` cubre ID-HU-FE-004: catálogo (empresa, periodos, estados), atípicos y causas, tendencia, datos insuficientes, varias fuentes, resultados guardados y desactualizados, acceso restringido y export a Excel. Ingesta real y extracción guionada.
+- `test_dashboard.py` (`test_be011_*`, `test_trend_endpoint`) y `test_ratios.py` (`test_be011_*`) cubren ID-HU-BE-011: guardado por periodo, ratio no calculable con la entrada faltante, tendencia cronológica de cuatro trimestres con fuentes, trimestre faltante (sin documento o sin una entrada) y el endpoint `/ratios/trend`.
 - `test_ratios.py` cubre ID-HU-BE-010.
   - **Sin base ni LLM** (extractor falso): cada fórmula contra estados de
     ejemplo, el mapeo de etiquetas, los ratios entre documentos, los ratios

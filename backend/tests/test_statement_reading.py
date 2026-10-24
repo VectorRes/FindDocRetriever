@@ -213,7 +213,7 @@ def test_no_derivation_from_different_periods(statements):
     balance_sheet = {k: v for k, v in BALANCE_SHEET.items() if k != "total_liabilities"}
     _, ratios, _ = _run({income: INCOME_STATEMENT, balance: balance_sheet}, [income, balance],
                         ratio_keys=["debt_to_equity"], periods={"total_assets": "FY2025"})
-    assert ratios["debt_to_equity"].status == "unavailable"
+    assert ratios["debt_to_equity"].status == "not_calculable"
 
 
 # --- comparative statements outside the US (found on a Colombian IFRS statement) ------------------

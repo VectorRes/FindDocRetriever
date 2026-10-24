@@ -314,7 +314,7 @@ class RatioSnapshot(Base):
     position: Mapped[int] = mapped_column(Integer, default=0)
     ratio_key: Mapped[str] = mapped_column(String(64))
     category: Mapped[str] = mapped_column(String(32))
-    # "calculated" | "needs_review" | "unavailable"
+    # "calculated" | "needs_review" | "not_calculable"
     status: Mapped[str] = mapped_column(String(32))
     value: Mapped[float | None] = mapped_column(Float, nullable=True)
     currency: Mapped[str | None] = mapped_column(String(16), nullable=True)
@@ -325,5 +325,8 @@ class RatioSnapshot(Base):
     # Statements the ratio needs that the entity has no document for in this
     # period ("balance_sheet"): shown as "insufficient data".
     missing_statements: Mapped[list] = mapped_column(JSON, default=list)
+    # The inputs, by name, that weren't found for this period: what makes a
+    # "not_calculable" ratio so (ID-HU-BE-011).
+    missing_inputs: Mapped[list] = mapped_column(JSON, default=list)
 
     run: Mapped["DashboardRun"] = relationship(back_populates="snapshots")

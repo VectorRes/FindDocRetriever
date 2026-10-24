@@ -85,6 +85,7 @@ function ratio(overrides: Partial<Ratio>): Ratio {
     currency: "COP",
     period: "FY2024",
     reasons: [],
+    missing_inputs: [],
     ...overrides,
   };
 }
@@ -169,10 +170,11 @@ const report: RatioReport = {
       name: "Inventory turnover",
       category: "efficiency",
       unit: "times",
-      status: "unavailable",
+      status: "not_calculable",
       value: null,
       inputs: [input({ key: "inventory", name: "Inventory", found: false, value: null, citation: null, label: null })],
       reasons: ["Missing input: Inventory."],
+      missing_inputs: ["Inventory"],
     }),
   ],
 };
@@ -264,7 +266,7 @@ describe("RatiosView", () => {
   it("explains why a ratio can't be calculated", async () => {
     await calculate();
     const card = screen.getByRole("article", { name: "Inventory turnover" });
-    expect(within(card).getByText("can't be calculated")).toBeInTheDocument();
+    expect(within(card).getByText("not calculable")).toBeInTheDocument();
     expect(within(card).getByText("Missing input: Inventory.")).toBeInTheDocument();
   });
 

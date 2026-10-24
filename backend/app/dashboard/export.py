@@ -16,7 +16,7 @@ _HEADER_FILL = PatternFill("solid", fgColor="E2E8F0")
 _OUTLIER_FILL = PatternFill("solid", fgColor="FEF3C7")
 _STATUS_TEXT = {
     "needs_review": "held for review",
-    "unavailable": "insufficient data",
+    "not_calculable": "not calculable",
     "not_calculated": "not calculated",
     "restricted": "restricted",
 }

@@ -25,7 +25,7 @@ export function formatRatioValue(value: number | null, unit: "percent" | "times"
 const STATUS_TEXT: Record<DashboardPoint["status"], string> = {
   calculated: "",
   needs_review: "held for review",
-  unavailable: "insufficient data",
+  not_calculable: "not calculable",
   not_calculated: "not calculated",
   restricted: "restricted",
 };

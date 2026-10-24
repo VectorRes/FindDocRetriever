@@ -38,8 +38,8 @@ export function pointText(point: DashboardPoint, unit: "percent" | "times", revi
       return formatRatioValue(point.value, unit);
     case "needs_review":
       return reviewed ? formatRatioValue(point.value, unit) : "Held for review";
-    case "unavailable":
-      return "Insufficient data";
+    case "not_calculable":
+      return "Not calculable";
     case "not_calculated":
       return "Not calculated";
     case "restricted":
@@ -414,6 +414,9 @@ function StatusChips({ point, detail = false }: { point: DashboardPoint; detail?
           missing {point.missing_statements.map((s) => STATEMENT_LABELS[s]).join(" + ")}
         </span>
       )}
+      {!detail && point.missing_statements.length === 0 && point.missing_inputs.length > 0 && (
+        <span style={{ ...chipStyle, ...staleChipStyle }}>missing {point.missing_inputs.join(", ").toLowerCase()}</span>
+      )}
       {point.outlier && <span style={{ ...chipStyle, ...outlierChipStyle }}>⚠ outlier</span>}
       {point.stale && <span style={{ ...chipStyle, ...staleChipStyle }}>outdated</span>}
       {detail && point.cross_document && <span style={chipStyle}>cross-document: {sourceCount(point)} sources</span>}
@@ -489,7 +492,11 @@ function RatioDetail({ ratio, period, reviewed, onReviewed, onSelectPeriod, onCi
     const key = input.document_filename ?? "Not found in any document";
     byDocument.set(key, [...(byDocument.get(key) ?? []), input]);
   }
-  const insufficient = point?.status === "unavailable";
+  const notCalculable = point?.status === "not_calculable";
+  // The "Missing input: …" reason is already said by the not-calculable box.
+  const reasons = (point?.reasons ?? []).filter(
+    (reason) => !(notCalculable && point?.missing_inputs.length && reason.startsWith("Missing input")),
+  );
   return (
     <section aria-label={`${ratio.name} detail`} style={panelStyle}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: "1rem", alignItems: "baseline", flexWrap: "wrap" }}>
@@ -554,9 +561,14 @@ function RatioDetail({ ratio, period, reviewed, onReviewed, onSelectPeriod, onCi
             <h4 style={{ margin: 0, fontSize: "0.9rem" }}>Sources for {period}</h4>
             <StatusChips point={point} detail />
           </div>
-          {insufficient && (
+          {notCalculable && (
             <div role="status" style={insufficientStyle}>
-              <strong>Insufficient data</strong> — this doesn't mean "no activity".
+              <strong>Not calculable</strong> — this doesn't mean "no activity" or zero.
+              {point.missing_inputs.length > 0 && (
+                <div data-testid="missing-inputs">
+                  Missing input{point.missing_inputs.length > 1 ? "s" : ""}: {point.missing_inputs.join(", ")}.
+                </div>
+              )}
               {point.missing_statements.length > 0 && (
                 <div>
                   Missing document: the {point.missing_statements.map((s) => STATEMENT_LABELS[s]).join(" and the ")} for{" "}
@@ -568,9 +580,9 @@ function RatioDetail({ ratio, period, reviewed, onReviewed, onSelectPeriod, onCi
           {point.status === "not_calculated" && (
             <p style={hintStyle}>This period hasn't been calculated yet. Use “Calculate” above.</p>
           )}
-          {point.reasons.length > 0 && point.missing_statements.length === 0 && (
+          {reasons.length > 0 && point.missing_statements.length === 0 && (
             <ul style={{ margin: 0, paddingLeft: "1.1rem", fontSize: "0.8rem", color: point.status === "needs_review" ? "#b45309" : "#475569" }}>
-              {point.reasons.map((reason) => (
+              {reasons.map((reason) => (
                 <li key={reason}>{reason}</li>
               ))}
             </ul>

@@ -10,7 +10,9 @@
      - an input whose label isn't a standard name for it  -> needs_review;
      - inputs from different periods                        -> needs_review;
      - inputs in different currencies, a missing input, or
-       a zero denominator                                   -> unavailable.
+       a zero denominator                                   -> not_calculable
+       (ID-HU-BE-011: never a blank or a misleading value; a
+       missing input is named in `missing_inputs`).
 
 The model is only involved inside `extract_figure` (one call per input and
 document tried), whose values are verified to appear in their source.
@@ -86,7 +88,7 @@ class RatioResult:
     unit: str
     description: str
     # "calculated" | "needs_review" (value shown only after the analyst reviews
-    # the flagged inputs) | "unavailable" (value is None).
+    # the flagged inputs) | "not_calculable" (value is None, see reasons).
     status: str
     value: float | None
     inputs: list[MappedInput]
@@ -97,6 +99,9 @@ class RatioResult:
     currency: str | None = None
     period: str | None = None
     reasons: list[str] = field(default_factory=list)
+    # Names of the inputs that weren't found ("Current liabilities"), when
+    # that's why the ratio is not calculable (ID-HU-BE-011).
+    missing_inputs: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -335,13 +340,14 @@ def compute_ratio(definition: RatioDefinition, mapped: dict[str, MappedInput]) -
     result = RatioResult(
         key=definition.key, name=definition.name, category=definition.category,
         formula=definition.formula, unit=definition.unit, description=definition.description,
-        status="unavailable", value=None, inputs=inputs,
+        status="not_calculable", value=None, inputs=inputs,
         citations=_unique_citations(inputs),
         cross_document=len({i.document_id for i in inputs if i.found}) > 1,
     )
 
     missing = [i.name for i in inputs if not i.found]
     if missing:
+        result.missing_inputs = missing
         result.reasons.append(f"Missing input: {', '.join(missing)}.")
         return result
 

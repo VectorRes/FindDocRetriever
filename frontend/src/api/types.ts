@@ -214,7 +214,7 @@ export interface Ratio {
   formula: string;
   unit: "percent" | "times"; // percent: value is a fraction (0.25 = 25%)
   description: string;
-  status: "calculated" | "needs_review" | "unavailable";
+  status: "calculated" | "needs_review" | "not_calculable";
   value: number | null;
   inputs: RatioInput[];
   citations: CitationOut[];
@@ -222,6 +222,8 @@ export interface Ratio {
   currency: string | null;
   period: string | null;
   reasons: string[];
+  // ID-HU-BE-011: inputs not found, by name, when status is "not_calculable".
+  missing_inputs: string[];
 }
 
 export interface RatioReport {
@@ -311,7 +313,9 @@ export interface Outlier {
   drivers: Driver[];
 }
 
-export type PointStatus = "calculated" | "needs_review" | "unavailable" | "not_calculated" | "restricted";
+// not_calculable: can't be calculated for the period (ID-HU-BE-011: see
+// missing_inputs); not_calculated: has documents, not refreshed yet.
+export type PointStatus = "calculated" | "needs_review" | "not_calculable" | "not_calculated" | "restricted";
 
 export interface DashboardPoint {
   period: string;
@@ -323,6 +327,7 @@ export interface DashboardPoint {
   cross_document: boolean;
   reasons: string[];
   missing_statements: Statement[];
+  missing_inputs: string[];
   stale: boolean;
   outlier: Outlier | null;
 }
@@ -340,6 +345,8 @@ export interface DashboardRatio {
 export interface DashboardPeriod {
   period: string;
   calculated: boolean;
+  // No document covers this period: a gap in the entity's history.
+  gap: boolean;
   stale: boolean;
   restricted: boolean;
   computed_at: string | null;

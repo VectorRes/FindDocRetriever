@@ -105,6 +105,30 @@ def quarter_period(year: int, quarter: int) -> Period:
     return Period(f"{year}-{quarter}", f"Q{quarter} {year}")
 
 
+def fill_gaps(periods, limit: int | None = None) -> list[Period]:
+    """`periods` plus the ones missing between them, chronologically: the
+    quarters between the first and last quarter, the years between the first
+    and last year (ID-HU-BE-011). Q1, Q2 and Q4 2024 give Q1..Q4 2024, so a
+    trend shows Q3 as a gap instead of skipping it.
+
+    With `limit`, gaps are only added among the `limit` most recent periods
+    (the window a refresh calculates): documents from 2010 and 2025 don't
+    produce fourteen empty years. The given periods are always kept."""
+    present = set(periods)
+    years = sorted(int(p.sort[:4]) for p in present if p.sort.endswith("-5"))
+    quarters = sorted(int(p.sort[:4]) * 4 + int(p.sort[-1]) - 1 for p in present if not p.sort.endswith("-5"))
+    gaps: set[Period] = set()
+    if years:
+        gaps |= {year_period(y) for y in range(years[0], years[-1] + 1)}
+    if quarters:
+        gaps |= {quarter_period(q // 4, q % 4 + 1) for q in range(quarters[0], quarters[-1] + 1)}
+    gaps -= present
+    if limit is not None:
+        window = sorted(present | gaps)[-limit:]
+        gaps = {p for p in gaps if p >= window[0]} if window else set()
+    return sorted(present | gaps)
+
+
 def period_of_column(label: str) -> Period | None:
     """The full year or quarter a column heading stands for, or None for
     year-to-date spans, budget/plan and change columns, or no date at all."""

@@ -12,10 +12,10 @@ import openpyxl
 import pytest
 from fastapi.testclient import TestClient
 
-from app.dashboard.catalog import entity_from_filename, parse_period, period_of_column
+from app.dashboard.catalog import entity_from_filename, fill_gaps, parse_period, period_of_column
 from app.dashboard.outliers import Outlier, detect_outliers, explain
-from app.dashboard.service import DashboardError, get_dashboard, refresh
-from app.db.models import DashboardRun, RetrievalAuditLog
+from app.dashboard.service import DashboardError, get_dashboard, get_trend, refresh
+from app.db.models import DashboardRun, RatioSnapshot, RetrievalAuditLog
 from app.db.session import SessionLocal
 from app.figures.extraction import ExtractedFigure, ExtractionServiceError
 from app.ingestion.service import ingest_excel_file
@@ -70,6 +70,22 @@ def test_typed_periods(text, label):
 def test_periods_sort_chronologically():
     periods = [parse_period(p) for p in ("2025", "Q3 2024", "2024", "Q1 2025")]
     assert [p.label for p in sorted(periods)] == ["Q3 2024", "2024", "Q1 2025", "2025"]
+
+
+def test_gaps_between_periods_are_filled_chronologically():
+    periods = [parse_period(p) for p in ("Q1 2024", "Q2 2024", "Q4 2024", "2022", "2024")]
+    assert [p.label for p in fill_gaps(periods)] == [
+        "2022", "2023", "Q1 2024", "Q2 2024", "Q3 2024", "Q4 2024", "2024",
+    ]
+    assert [p.label for p in fill_gaps([parse_period("Q4 2024"), parse_period("Q1 2025")])] == ["Q4 2024", "Q1 2025"]
+
+
+def test_gaps_are_only_filled_among_the_most_recent_periods():
+    filled = fill_gaps([parse_period("2010"), parse_period("2025")], limit=4)
+    assert [p.label for p in filled] == ["2010", "2022", "2023", "2024", "2025"]
+    # A gap inside the window is still shown.
+    filled = fill_gaps([parse_period(p) for p in ("Q1 2024", "Q2 2024", "Q4 2024")], limit=8)
+    assert [p.label for p in filled] == ["Q1 2024", "Q2 2024", "Q3 2024", "Q4 2024"]
 
 
 # --- outliers -----------------------------------------------------------------------------------
@@ -185,18 +201,19 @@ def company(db_session, tmp_path):
     extractor = StatementExtractor()
     created = []
 
-    def add(kind: str, year: int, items: dict, tag: str = "internal", name_override: str | None = None):
+    def add(kind: str, year: int | str, items: dict, tag: str = "internal", name_override: str | None = None):
+        # `year` is 2024 for the full year or "Q3 2024" for a quarter.
         sheet = "Estado de resultados" if kind == "EERR" else "Balance general"
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = sheet
-        ws.append([f"{name} — {sheet} — Año {year}"])
+        ws.append([f"{name} — {sheet} — {year if isinstance(year, str) else f'Año {year}'}"])
         ws.append(["Concepto", str(year)])
         for label, value in items.values():
             ws.append([label, value])
         path = tmp_path / f"{uuid.uuid4().hex}.xlsx"
         wb.save(path)
-        filename = name_override or f"{kind}_{name}_{year}.xlsx"
+        filename = name_override or f"{kind}_{name}_{str(year).replace(' ', '_')}.xlsx"
         document = ingest_excel_file(db_session, filename=filename, file_path=path)
         document.confidentiality_tag = tag
         for chunk in document.chunks:
@@ -280,9 +297,10 @@ def test_alternate_1_missing_balance_sheet_is_insufficient_data(db_session, comp
 
     for key in ("debt_to_equity", "debt_ratio", "current_ratio", "roe", "roa"):
         point = _point(dashboard, key, "2024")
-        assert point.status == "unavailable" and point.value is None
+        assert point.status == "not_calculable" and point.value is None
         assert point.missing_statements == ["balance_sheet"]
         assert point.reasons == [f"Insufficient data: the balance sheet for 2024 hasn't been ingested for {company.name}."]
+    assert _point(dashboard, "current_ratio", "2024").missing_inputs == ["Current assets", "Current liabilities"]
     assert _point(dashboard, "interest_coverage", "2024").status == "calculated"
     # Balance-sheet inputs were never sent to extraction.
     assert not {key for _, key, _ in company.extractor.calls} & {"total_assets", "total_equity", "current_assets"}
@@ -343,8 +361,119 @@ def test_typed_period_without_documents_is_insufficient_data(db_session, company
     dashboard = refresh(db_session, company.name, periods=["2022"], extractor=company.extractor)
 
     point = _point(dashboard, "net_margin", "2022")
-    assert point.status == "unavailable"
+    assert point.status == "not_calculable"
     assert point.missing_statements == ["income_statement"]
+
+
+# --- ID-HU-BE-011: ratios stored per period, "not calculable", trends ------------------------
+
+QUARTERS = {  # quarter: (revenue, EBITDA)
+    "Q1 2024": (1_000_000, 200_000), "Q2 2024": (1_100_000, 242_000),
+    "Q3 2024": (1_200_000, 276_000), "Q4 2024": (1_300_000, 312_000),
+}
+
+
+def _quarter(quarter, with_ebitda=True):
+    revenue, ebitda = QUARTERS[quarter]
+    items = {"revenue": ("Ingresos", revenue)}
+    if with_ebitda:
+        items["ebitda"] = ("EBITDA", ebitda)
+    return items
+
+
+def test_be011_ratios_are_stored_per_period(db_session, company):
+    for quarter in QUARTERS:
+        company("EERR", quarter, _quarter(quarter))
+
+    refresh(db_session, company.name, extractor=company.extractor)
+
+    runs = db_session.query(DashboardRun).filter(DashboardRun.entity == company.name).all()
+    assert sorted(r.period for r in runs) == sorted(QUARTERS)
+    stored = {r.period: next(s for s in r.snapshots if s.ratio_key == "ebitda_margin") for r in runs}
+    for quarter, (revenue, ebitda) in QUARTERS.items():
+        assert stored[quarter].status == "calculated"
+        assert stored[quarter].value == pytest.approx(ebitda / revenue)
+
+
+def test_be011_main_ebitda_margin_trend_over_four_quarters(db_session, company):
+    for quarter in QUARTERS:
+        company("EERR", quarter, _quarter(quarter))
+    refresh(db_session, company.name, extractor=company.extractor)
+    calls = len(company.extractor.calls)
+
+    trend = get_trend(db_session, company.name, "ebitda_margin")
+
+    assert len(company.extractor.calls) == calls  # read from storage
+    assert [p.period for p in trend.points] == ["Q1 2024", "Q2 2024", "Q3 2024", "Q4 2024"]
+    assert [p.value for p in trend.points] == pytest.approx([e / r for r, e in QUARTERS.values()])
+    for point in trend.points:
+        assert point.status == "calculated"
+        assert {c.text.split(":")[0] for c in point.citations} == {"EBITDA", "Ingresos"}
+        assert all(c.document_filename.endswith(f"_{point.period.replace(' ', '_')}.xlsx") for c in point.citations)
+    assert trend.unit == "percent" and trend.name == "EBITDA margin"
+
+
+def test_be011_alternate_1_missing_current_liabilities_is_reported(db_session, company):
+    balance = {k: v for k, v in BALANCE[2024].items() if k != "current_liabilities"}
+    company("EERR", 2024, INCOME[2024])
+    company("Balance", 2024, balance)
+
+    dashboard = refresh(db_session, company.name, extractor=company.extractor)
+
+    point = _point(dashboard, "current_ratio", "2024")
+    assert point.status == "not_calculable" and point.value is None
+    assert point.missing_inputs == ["Current liabilities"]
+    assert point.missing_statements == []
+    stored = (db_session.query(RatioSnapshot).join(DashboardRun)
+              .filter(DashboardRun.entity == company.name, RatioSnapshot.ratio_key == "current_ratio").one())
+    assert stored.status == "not_calculable" and stored.missing_inputs == ["Current liabilities"]
+    assert _point(dashboard, "debt_ratio", "2024").status == "calculated"
+
+
+def test_be011_alternate_2_quarter_without_documents_is_not_calculable(db_session, company):
+    for quarter in ("Q1 2024", "Q2 2024", "Q4 2024"):
+        company("EERR", quarter, _quarter(quarter))
+    refresh(db_session, company.name, extractor=company.extractor)
+
+    trend = get_trend(db_session, company.name, "ebitda_margin")
+
+    assert [p.period for p in trend.points] == ["Q1 2024", "Q2 2024", "Q3 2024", "Q4 2024"]
+    q3 = trend.points[2]
+    assert q3.status == "not_calculable" and q3.value is None
+    assert q3.missing_inputs == ["EBITDA", "Revenue"]
+    assert "Q3 2024" in q3.reasons[0]
+    assert [p.status for p in trend.points] == ["calculated", "calculated", "not_calculable", "calculated"]
+    assert any("Q3 2024" in note for note in trend.notes)
+    dashboard = get_dashboard(db_session, company.name)
+    assert [(p.period, p.gap) for p in dashboard.periods][2] == ("Q3 2024", True)
+
+
+def test_be011_alternate_2_quarter_missing_an_input_is_not_calculable(db_session, company):
+    for quarter in QUARTERS:
+        company("EERR", quarter, _quarter(quarter, with_ebitda=quarter != "Q3 2024"))
+    refresh(db_session, company.name, extractor=company.extractor)
+
+    trend = get_trend(db_session, company.name, "ebitda_margin")
+
+    q3 = next(p for p in trend.points if p.period == "Q3 2024")
+    assert q3.status == "not_calculable" and q3.value is None
+    assert q3.missing_inputs == ["EBITDA"]
+    assert [p.period for p in trend.points] == list(QUARTERS)
+
+
+def test_be011_trend_of_requested_periods_keeps_ones_without_data(db_session, company):
+    company("EERR", "Q1 2024", _quarter("Q1 2024"))
+    refresh(db_session, company.name, extractor=company.extractor)
+
+    trend = get_trend(db_session, company.name, "ebitda_margin", periods=["Q2 2024", "Q1 2024"])
+
+    assert [(p.period, p.status) for p in trend.points] == [("Q1 2024", "calculated"), ("Q2 2024", "not_calculable")]
+
+
+def test_be011_unknown_ratio(db_session, company):
+    company("EERR", 2024, INCOME[2024])
+    with pytest.raises(DashboardError):
+        get_trend(db_session, company.name, "vibes_ratio")
 
 
 def test_viewer_without_access_sees_no_values_and_is_logged(db_session, company):
@@ -428,6 +557,23 @@ def test_dashboard_endpoint_and_excel_export(client, db_session, company):
 
     assert client.get("/dashboard", params={"entity": "Nobody-xyz"}).status_code == 404
     assert client.get("/dashboard", params={"entity": company.name, "categories": ["vibes"]}).status_code == 400
+
+
+def test_trend_endpoint(client, db_session, company):
+    for quarter in ("Q1 2024", "Q2 2024", "Q4 2024"):
+        company("EERR", quarter, _quarter(quarter))
+    refresh(db_session, company.name, extractor=company.extractor)
+
+    response = client.get("/ratios/trend", params={"entity": company.name, "ratio": "ebitda_margin"})
+
+    assert response.status_code == 200
+    trend = response.json()
+    assert [p["period"] for p in trend["points"]] == ["Q1 2024", "Q2 2024", "Q3 2024", "Q4 2024"]
+    assert trend["points"][2]["status"] == "not_calculable"
+    assert trend["points"][2]["missing_inputs"] == ["EBITDA", "Revenue"]
+    assert trend["points"][0]["citations"]
+    assert client.get("/ratios/trend", params={"entity": company.name, "ratio": "nope"}).status_code == 400
+    assert client.get("/ratios/trend", params={"entity": "Nobody-xyz", "ratio": "roe"}).status_code == 404
 
 
 def test_periods_come_from_statement_line_items_not_working_columns():

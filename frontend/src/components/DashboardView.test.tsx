@@ -64,7 +64,7 @@ function input(key: string, name: string, label: string, value: number, filename
 function point(period: string, value: number | null, extra: Partial<DashboardPoint> = {}): DashboardPoint {
   return {
     period,
-    status: value == null ? "unavailable" : "calculated",
+    status: value == null ? "not_calculable" : "calculated",
     value,
     currency: "COP",
     inputs: [],
@@ -72,6 +72,7 @@ function point(period: string, value: number | null, extra: Partial<DashboardPoi
     cross_document: false,
     reasons: [],
     missing_statements: [],
+    missing_inputs: [],
     stale: false,
     outlier: null,
     ...extra,
@@ -110,6 +111,7 @@ function andina(): Dashboard {
     periods: ["2024", "2025"].map((period) => ({
       period,
       calculated: true,
+      gap: false,
       stale: false,
       restricted: false,
       computed_at: "2026-10-20T12:00:00Z",
@@ -126,6 +128,7 @@ function andina(): Dashboard {
         point("2024", 0.398),
         point("2025", null, {
           missing_statements: ["balance_sheet"],
+          missing_inputs: ["Total liabilities", "Total assets"],
           reasons: ["Insufficient data: the balance sheet for 2025 hasn't been ingested for Andina."],
         }),
       ]),
@@ -188,9 +191,34 @@ describe("DashboardView", () => {
 
     await userEvent.click(await screen.findByRole("button", { name: "Debt ratio card" }));
 
-    expect(screen.getByTestId("card-value-debt_ratio")).toHaveTextContent("Insufficient data");
+    expect(screen.getByTestId("card-value-debt_ratio")).toHaveTextContent("Not calculable");
     const detail = screen.getByRole("region", { name: "Debt ratio detail" });
     expect(within(detail).getByRole("status")).toHaveTextContent("Missing document: the balance sheet for 2025");
+    expect(within(detail).getByTestId("missing-inputs")).toHaveTextContent("Missing inputs: Total liabilities, Total assets.");
+  });
+
+  it("names the missing line item of a ratio that can't be calculated (ID-HU-BE-011)", async () => {
+    const dashboard = andina();
+    dashboard.ratios.push(
+      ratio("cash_ratio", "Cash ratio", "liquidity", "times", [
+        point("2024", 0.3),
+        point("2025", null, {
+          missing_inputs: ["Current liabilities"],
+          reasons: ["Missing input: Current liabilities."],
+        }),
+      ]),
+    );
+    mockedDashboard.mockResolvedValue(dashboard);
+    render(<DashboardView onCitationClick={() => {}} />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Cash ratio card" }));
+
+    expect(screen.getByTestId("card-value-cash_ratio")).toHaveTextContent("Not calculable");
+    expect(screen.getByRole("button", { name: "Cash ratio card" })).toHaveTextContent("missing current liabilities");
+    const detail = screen.getByRole("region", { name: "Cash ratio detail" });
+    expect(within(detail).getByTestId("missing-inputs")).toHaveTextContent("Missing input: Current liabilities.");
+    // Said once, not again in the list of reasons.
+    expect(within(detail).getAllByText("Missing input: Current liabilities.")).toHaveLength(1);
   });
 
   it("shows a prior period when it's selected", async () => {
@@ -263,7 +291,7 @@ describe("pointText and changeText", () => {
   it("never shows a held or missing value as a number", () => {
     expect(pointText(point("2025", 0.25, { status: "needs_review" }), "percent")).toBe("Held for review");
     expect(pointText(point("2025", 0.25, { status: "needs_review" }), "percent", true)).toBe("25.0%");
-    expect(pointText(point("2025", null), "percent")).toBe("Insufficient data");
+    expect(pointText(point("2025", null), "percent")).toBe("Not calculable");
   });
 
   it("compares with the previous calculated period", () => {

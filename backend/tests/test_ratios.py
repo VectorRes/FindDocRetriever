@@ -264,12 +264,32 @@ def test_each_input_is_looked_up_in_the_likeliest_document_first(statements):
     ]
 
 
-def test_input_missing_from_every_document_makes_the_ratio_unavailable(statements):
+def test_input_missing_from_every_document_makes_the_ratio_not_calculable(statements):
     income, balance = statements
     _, ratios, _ = _run({income: INCOME_STATEMENT, balance: {}}, [income, balance], ratio_keys=["roa", "net_margin"])
-    assert ratios["roa"].status == "unavailable" and ratios["roa"].value is None
+    assert ratios["roa"].status == "not_calculable" and ratios["roa"].value is None
     assert "Total assets" in ratios["roa"].reasons[0]
     assert ratios["net_margin"].status == "calculated"
+
+
+def test_be011_missing_current_liabilities_is_named_as_the_missing_input(statements):
+    # ID-HU-BE-011 alternate 1: the balance sheet has no current liabilities.
+    _, balance = statements
+    table = {k: v for k, v in BALANCE_SHEET.items() if k != "current_liabilities"}
+    _, ratios, _ = _run({balance: table}, [balance], ratio_keys=["current_ratio", "debt_ratio"])
+    current_ratio = ratios["current_ratio"]
+    assert current_ratio.status == "not_calculable" and current_ratio.value is None
+    assert current_ratio.missing_inputs == ["Current liabilities"]
+    assert current_ratio.reasons == ["Missing input: Current liabilities."]
+    assert ratios["debt_ratio"].status == "calculated" and ratios["debt_ratio"].missing_inputs == []
+
+
+def test_be011_not_calculable_for_another_reason_lists_no_missing_input(statements):
+    _, balance = statements
+    table = {**BALANCE_SHEET, "current_liabilities": ("Total current liabilities", 0)}
+    _, ratios, _ = _run({balance: table}, [balance], ratio_keys=["current_ratio"])
+    assert ratios["current_ratio"].status == "not_calculable"
+    assert ratios["current_ratio"].missing_inputs == []
 
 
 # --- alternate case 2: ambiguous line-item mapping ------------------------------------
@@ -314,7 +334,7 @@ def test_inputs_in_different_currencies_are_not_divided(statements):
     income, balance = statements
     _, ratios, _ = _run({income: INCOME_STATEMENT, balance: BALANCE_SHEET}, [income, balance],
                         ratio_keys=["roa"], currencies={"total_assets": "USD"})
-    assert ratios["roa"].status == "unavailable" and ratios["roa"].value is None
+    assert ratios["roa"].status == "not_calculable" and ratios["roa"].value is None
     assert "different currencies" in ratios["roa"].reasons[0]
 
 
@@ -322,7 +342,7 @@ def test_zero_denominator_is_reported_not_raised(statements):
     _, balance = statements
     table = {**BALANCE_SHEET, "current_liabilities": ("Total current liabilities", 0)}
     _, ratios, _ = _run({balance: table}, [balance], ratio_keys=["current_ratio"])
-    assert ratios["current_ratio"].status == "unavailable"
+    assert ratios["current_ratio"].status == "not_calculable"
     assert "denominator is zero" in ratios["current_ratio"].reasons[0]
 
 
@@ -502,7 +522,7 @@ def test_a_figure_the_model_invents_is_not_used(monkeypatch, db_session, tmp_pat
 
     report = compute_ratios(RatioRequest(document_ids=[income.id], ratios=["ebitda_margin"]), db=db_session)
     ebitda_margin = report.ratios[0]
-    assert ebitda_margin.status == "unavailable" and ebitda_margin.value is None
+    assert ebitda_margin.status == "not_calculable" and ebitda_margin.value is None
     assert "EBITDA" in ebitda_margin.reasons[0]
 
 
@@ -628,7 +648,7 @@ def test_model_down_for_some_inputs_is_noted(statements):
     report = calculate_ratios(None, [income], ratio_keys=["net_margin", "gross_margin"],
                               extractor=_FailingExtractor({income: INCOME_STATEMENT}, failing=["net_income"]))
     ratios = {r.key: r for r in report.ratios}
-    assert ratios["net_margin"].status == "unavailable"
+    assert ratios["net_margin"].status == "not_calculable"
     assert ratios["gross_margin"].status == "calculated"
     assert any("didn't respond for Net income" in note for note in report.notes)
 
@@ -713,7 +733,7 @@ def test_inputs_from_different_companies_are_not_combined(statements):
     report, ratios, _ = _run(tables, [balance, other], ratio_keys=["current_ratio"], overrides={
         "current_assets": {"entity": "Andina S.A.S."}, "current_liabilities": {"entity": "Pacífico S.A."},
     })
-    assert ratios["current_ratio"].status == "unavailable" and ratios["current_ratio"].value is None
+    assert ratios["current_ratio"].status == "not_calculable" and ratios["current_ratio"].value is None
     assert "different companies" in ratios["current_ratio"].reasons[0]
     assert "different companies" in report.notes[0]
 
