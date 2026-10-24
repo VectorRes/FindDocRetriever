@@ -201,6 +201,23 @@ Endpoints:
 Los documentos existentes antes de la migración `0012_version_control` quedan
 como `approved` (ya se estaban usando para responder).
 
+### Jerarquía de fuentes y borradores (ID-HU-BE-016)
+
+Cada documento tiene un **nivel de fuente** (`source_tier`, `app/source_tiers.py`), del más confiable al menos:
+
+1. `erp_epm`: exportaciones del ERP/EPM, la fuente de verdad.
+2. `official_report`: informes oficiales o publicados (10-K/10-Q, informe anual, estados auditados, earnings release).
+3. `internal_report`: reportes gerenciales, extractos de BI, archivos de trabajo.
+
+- **Al subir**, el nivel se deduce del nombre del archivo: `SAP_Andina_Q2_2026.xlsx` → ERP/EPM, `10-Q-Q3-2026.pdf` → informe oficial. Si no se reconoce, queda como informe interno, el nivel más bajo. La migración `0016_source_tier` aplica la misma regla a los documentos existentes.
+- **Para cambiarlo:** `PATCH /documents/{id}/source-tier` con `{"tier": "erp_epm"}`. Requiere un rol aprobador (403 si no) y responde 400 si el nivel no existe. En el frontend está en Documents → "Source tier".
+- **Prioridad** (`app/qa/source_hierarchy.py`): las fuentes del chat se ordenan por nivel, y el prompt muestra el nivel de cada una y pide usar la más alta. Además, en código: si el triage encontró la cifra pedida en fuentes de distinto nivel para la misma empresa y periodo, las de nivel menor se apartan antes de generar la respuesta. Así la respuesta sale del ERP/EPM aunque un reporte interno diga lo mismo.
+- **Avisos** (`source_notices[]` en `POST /query/answer`, con `kind`, `message` y `document_filenames`):
+  - `draft`: una fuente citada no está aprobada. *"Based on a draft document not yet approved: … Its figures are provisional, not approved figures."*
+  - `lower_tier`: una fuente citada no es ERP/EPM porque ninguna fuente de nivel mayor cubría la cifra. *"… These figures haven't been reconciled against the ERP/EPM source of truth."*
+  - `higher_tier_preferred`: una fuente de nivel menor también tenía la cifra pero no se usó como principal. *"Reporte_Gerencial.xlsx (internal report) also covers this figure but wasn't used as the primary source: SAP_….xlsx (ERP/EPM) ranks higher."*
+- `versions_used[]` incluye el `source_tier` de cada documento, y el chat muestra los avisos como banners.
+
 ### Recuperación de fuentes relevantes (ID-HU-BE-007)
 
 `retrieve()` (`app/retrieval/service.py`) busca los chunks (filas/celdas de
@@ -571,6 +588,7 @@ docker compose exec api pytest
 - `test_access_audit.py` cubre ID-HU-BE-014: registro de denegaciones (búsqueda, ratios, fuente y archivo), información privilegiada, que la denegación sobreviva al rollback, deduplicación por petición, filtros, paginación, CSV y el 403 de la auditoría. Las denegaciones se guardan en su propia sesión, así que cada test usa sus propios ids de usuario.
 - `test_dashboard.py` cubre ID-HU-FE-004: catálogo (empresa, periodos, estados), atípicos y causas, tendencia, datos insuficientes, varias fuentes, resultados guardados y desactualizados, acceso restringido y export a Excel. Ingesta real y extracción guionada.
 - `test_dashboard.py` (`test_be011_*`, `test_trend_endpoint`) y `test_ratios.py` (`test_be011_*`) cubren ID-HU-BE-011: guardado por periodo, ratio no calculable con la entrada faltante, tendencia cronológica de cuatro trimestres con fuentes, trimestre faltante (sin documento o sin una entrada) y el endpoint `/ratios/trend`.
+- `test_source_hierarchy.py` cubre ID-HU-BE-016: el nivel deducido del nombre, apartar la fuente de nivel menor con la misma cifra (y no apartarla si el periodo o la empresa difieren), los avisos de borrador y de nivel menor, el flujo completo de `answer_question` con un modelo guionado (ERP preferido, reporte interno sin ERP, pronóstico en borrador) y el endpoint `PATCH /documents/{id}/source-tier`.
 - `test_ratios.py` cubre ID-HU-BE-010.
   - **Sin base ni LLM** (extractor falso): cada fórmula contra estados de
     ejemplo, el mapeo de etiquetas, los ratios entre documentos, los ratios

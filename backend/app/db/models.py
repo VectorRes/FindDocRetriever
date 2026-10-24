@@ -37,6 +37,12 @@ def _default_version_group(context) -> str:
     return derive_version_group(params["filename"], params.get("doc_type") or "excel")
 
 
+def _default_source_tier(context) -> str:
+    from app.source_tiers import infer_tier
+
+    return infer_tier(context.get_current_parameters()["filename"])
+
+
 class Document(Base):
     """A single uploaded workbook (one filename + version)."""
 
@@ -69,6 +75,10 @@ class Document(Base):
     # "draft" until approved by a reviewer; see app/versioning.py.
     approval_status: Mapped[str] = mapped_column(String(16), default="draft")
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # ID-HU-BE-016: place in the source-of-truth hierarchy, "erp_epm" >
+    # "official_report" > "internal_report" (app/source_tiers.py). Inferred
+    # from the filename on upload; a reviewer can change it.
+    source_tier: Mapped[str] = mapped_column(String(32), default=_default_source_tier)
     # Restrictive by default. Reviewers can classify documents as public/internal
     # or assign a category such as restricted:compensation.
     confidentiality_tag: Mapped[str] = mapped_column(

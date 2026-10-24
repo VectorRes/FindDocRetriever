@@ -2,7 +2,13 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import DocumentList from "./DocumentList";
-import { approveDocument, deleteDocument, listDocuments, setDocumentConfidentiality } from "../api/client";
+import {
+  approveDocument,
+  deleteDocument,
+  listDocuments,
+  setDocumentConfidentiality,
+  setDocumentSourceTier,
+} from "../api/client";
 import type { DocumentOut } from "../api/types";
 
 vi.mock("../api/client", async () => {
@@ -13,6 +19,7 @@ vi.mock("../api/client", async () => {
     deleteDocument: vi.fn(),
     setDocumentConfidentiality: vi.fn(),
     approveDocument: vi.fn(),
+    setDocumentSourceTier: vi.fn(),
   };
 });
 
@@ -20,6 +27,7 @@ const mockedListDocuments = vi.mocked(listDocuments);
 const mockedDeleteDocument = vi.mocked(deleteDocument);
 const mockedSetConfidentiality = vi.mocked(setDocumentConfidentiality);
 const mockedApproveDocument = vi.mocked(approveDocument);
+const mockedSetSourceTier = vi.mocked(setDocumentSourceTier);
 
 function makeDocument(overrides: Partial<DocumentOut> = {}): DocumentOut {
   return {
@@ -36,6 +44,7 @@ function makeDocument(overrides: Partial<DocumentOut> = {}): DocumentOut {
     version_number: 1,
     approval_status: "approved",
     approved_at: null,
+    source_tier: "internal_report",
     confidentiality_tag: "public",
     sheet_names: ["Assumptions", "FCF"],
     ...overrides,
@@ -48,6 +57,27 @@ describe("DocumentList", () => {
     mockedDeleteDocument.mockReset();
     mockedSetConfidentiality.mockReset();
     mockedApproveDocument.mockReset();
+    mockedSetSourceTier.mockReset();
+  });
+
+  it("shows each document's source tier and lets an approver change it (ID-HU-BE-016)", async () => {
+    mockedListDocuments.mockResolvedValueOnce({ documents: [makeDocument({ filename: "Reporte_Gerencial.xlsx" })] });
+    mockedSetSourceTier.mockResolvedValueOnce(makeDocument({ filename: "Reporte_Gerencial.xlsx", source_tier: "erp_epm" }));
+
+    render(<DocumentList open={true} onClose={vi.fn()} canApprove />);
+
+    await waitFor(() => expect(screen.getByText("internal report", { selector: "span" })).toBeInTheDocument());
+    await userEvent.selectOptions(screen.getByLabelText("Source tier for Reporte_Gerencial.xlsx"), "erp_epm");
+
+    expect(mockedSetSourceTier).toHaveBeenCalledWith("doc-1", "erp_epm");
+    await waitFor(() => expect(screen.getByText("ERP/EPM", { selector: "span" })).toBeInTheDocument());
+  });
+
+  it("shows the source tier without a control to roles that can't approve", async () => {
+    mockedListDocuments.mockResolvedValueOnce({ documents: [makeDocument()] });
+    render(<DocumentList open={true} onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText("internal report", { selector: "span" })).toBeInTheDocument());
+    expect(screen.queryByLabelText("Source tier for budget.xlsx")).not.toBeInTheDocument();
   });
 
   it("renders nothing when closed", () => {

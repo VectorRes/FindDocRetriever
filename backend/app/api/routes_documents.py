@@ -25,8 +25,10 @@ from app.schemas import (
     DocumentListOut,
     DocumentOut,
     DocumentResolutionOut,
+    SourceTierRequest,
     SupersedeRequest,
 )
+from app.source_tiers import TIERS
 from app.audit import Denial, record_denials
 from app.storage import delete_document_file, get_document_file_path
 from app.retrieval.access import can_access, normalize_tag, parse_roles
@@ -252,6 +254,27 @@ def supersede_document(
     recompute_group(db, newer.version_group)
     if old_group != newer.version_group:
         recompute_group(db, old_group)
+    db.commit()
+    db.refresh(document)
+    return document
+
+
+@router.patch("/documents/{document_id}/source-tier", response_model=DocumentOut)
+def set_source_tier(
+    document_id: str,
+    request: SourceTierRequest,
+    x_user_role: Annotated[str, Header(alias="X-User-Role")] = "analyst",
+    db: Session = Depends(get_db),
+) -> DocumentOut:
+    """ID-HU-BE-016: place a document in the source hierarchy — "erp_epm"
+    (source of truth), "official_report" or "internal_report". Answers prefer
+    the highest tier available. Like approval, it takes a reviewer role."""
+    if request.tier not in TIERS:
+        raise HTTPException(status_code=400, detail=f"Unknown source tier. Use one of: {', '.join(TIERS)}.")
+    if not parse_roles(x_user_role) & APPROVER_ROLES:
+        raise HTTPException(status_code=403, detail="Changing a document's source tier requires a reviewer role.")
+    document = _get_document_or_404(db, document_id)
+    document.source_tier = request.tier
     db.commit()
     db.refresh(document)
     return document

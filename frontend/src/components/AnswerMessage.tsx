@@ -1,5 +1,6 @@
 import type { CSSProperties } from "react";
-import type { AnswerResponse, CitationOut } from "../api/types";
+import { SOURCE_TIER_LABELS } from "../api/types";
+import type { AnswerResponse, CitationOut, SourceNotice } from "../api/types";
 import CitationBadge from "./CitationBadge";
 
 interface AnswerMessageProps {
@@ -8,6 +9,13 @@ interface AnswerMessageProps {
   // ID-HU-BE-009: send one of the clarification options as the next question.
   onClarify?: (reply: string) => void;
 }
+
+// ID-HU-BE-016: how each kind of source notice is shown.
+const SOURCE_NOTICE_STYLES: Record<SourceNotice["kind"], { title: string; background: string; color: string }> = {
+  draft: { title: "Draft source", background: "#fef3c7", color: "#92400e" },
+  lower_tier: { title: "Lower-tier source", background: "#fff7ed", color: "#c2410c" },
+  higher_tier_preferred: { title: "Higher-tier source used", background: "#f1f5f9", color: "#334155" },
+};
 
 const CONFIDENCE_STYLES = {
   high: { background: "#f0fdf4", color: "#15803d" },
@@ -98,6 +106,19 @@ export default function AnswerMessage({ answer, onCitationClick, onClarify }: An
           .
         </div>
       ))}
+      {(answer.source_notices ?? []).map((notice) => {
+        const style = SOURCE_NOTICE_STYLES[notice.kind];
+        return (
+          <div
+            key={`${notice.kind}-${notice.document_filenames.join(",")}`}
+            role="note"
+            aria-label={style.title}
+            style={{ ...bannerStyle(style.background, style.color), marginBottom: "0.5rem" }}
+          >
+            <strong>{style.title}.</strong> {notice.message}
+          </div>
+        );
+      })}
       {answer.has_conflicts && (
         <div style={{ ...bannerStyle("#fff7ed", "#c2410c"), marginBottom: "0.5rem" }}>
           Sources disagree on this — both values are shown below with their own citations.
@@ -125,7 +146,11 @@ export default function AnswerMessage({ answer, onCitationClick, onClarify }: An
         <div style={{ marginTop: "0.4rem", fontSize: "0.78rem", color: "#64748b" }}>
           Based on:{" "}
           {versionsUsed
-            .map((v) => `${v.filename} (v${v.version_number}, ${v.approval_status}${v.is_current ? ", current" : ""})`)
+            .map(
+              (v) =>
+                `${v.filename} (${v.source_tier ? `${SOURCE_TIER_LABELS[v.source_tier]}, ` : ""}v${v.version_number}, ` +
+                `${v.approval_status}${v.is_current ? ", current" : ""})`,
+            )
             .join("; ")}
         </div>
       )}

@@ -104,6 +104,7 @@ describe("Chat", () => {
           version_number: 1,
           approval_status: "approved",
           approved_at: null,
+          source_tier: "internal_report",
           confidentiality_tag: "public",
           sheet_names: [],
         }}

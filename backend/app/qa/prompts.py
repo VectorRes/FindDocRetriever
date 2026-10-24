@@ -1,4 +1,5 @@
 from app.retrieval.service import RetrievedChunk
+from app.source_tiers import TIER_NAMES
 
 SYSTEM_PROMPT = """\
 You are the answer-generation engine for FinDoc Retriever, a financial \
@@ -72,6 +73,11 @@ Excel cells). Follow these rules strictly:
    Give the figure asked for; add breakdowns only when the QUESTION asks \
    for them, and never present a percentage or growth rate as an amount \
    (a "20" in a growth table is 20%, not 20 million).
+14. Sources show their tier in the source hierarchy: ERP/EPM (the source \
+   of truth) ranks above an official report, which ranks above an internal \
+   report. When sources of different tiers give the same figure, give it \
+   from the highest-tier source and cite only that source; rule 5 is about \
+   sources of the same tier.
 """
 
 # ID-HU-BE-009: run before generation, as its own focused task.
@@ -125,6 +131,9 @@ def describe_location(chunk: RetrievedChunk) -> str:
         parts.append(f"page {chunk.page_number}")
     if chunk.reference_number:
         parts.append(f"note/ref {chunk.reference_number}")
+    if chunk.source_tier:
+        # ID-HU-BE-016: so the model can prefer the highest tier.
+        parts.append(f"tier: {TIER_NAMES.get(chunk.source_tier, chunk.source_tier)}")
     return ", ".join(parts)
 
 

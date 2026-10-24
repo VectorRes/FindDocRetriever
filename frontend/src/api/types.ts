@@ -30,6 +30,8 @@ export interface AnswerResponse {
   restriction_notice?: string | null;
   // ID-HU-BE-015: which document version(s) the cited sources came from.
   versions_used?: VersionUsed[];
+  // ID-HU-BE-016: draft / lower-tier source warnings.
+  source_notices?: SourceNotice[];
   // ID-HU-BE-009: choices found in the sources for an ambiguous question.
   clarification_options?: string[];
   // ID-HU-BE-009: null when there is no answer to rate.
@@ -58,6 +60,25 @@ export interface VersionUsed {
   is_current: boolean;
   // Set when the answer used a non-default (e.g. superseded) version.
   current_version_filename: string | null;
+  // ID-HU-BE-016: the document's place in the source hierarchy.
+  source_tier?: SourceTier;
+}
+
+// ID-HU-BE-016: source-of-truth hierarchy, most authoritative first.
+export type SourceTier = "erp_epm" | "official_report" | "internal_report";
+
+export const SOURCE_TIER_LABELS: Record<SourceTier, string> = {
+  erp_epm: "ERP/EPM",
+  official_report: "official report",
+  internal_report: "internal report",
+};
+
+export interface SourceNotice {
+  // draft: a cited document isn't approved; lower_tier: no ERP/EPM source
+  // covered it; higher_tier_preferred: a lower-tier source was set aside.
+  kind: "draft" | "lower_tier" | "higher_tier_preferred";
+  message: string;
+  document_filenames: string[];
 }
 
 export interface QueryRequest {
@@ -83,6 +104,8 @@ export interface DocumentOut {
   version_number: number;
   approval_status: string; // "draft" | "approved"
   approved_at: string | null;
+  // ID-HU-BE-016: inferred from the filename; a reviewer can change it.
+  source_tier: SourceTier;
   confidentiality_tag: string;
   sheet_names: string[];
 }

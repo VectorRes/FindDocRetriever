@@ -27,6 +27,9 @@ class RetrievedChunk:
     confidentiality_tag: str = "restricted"
     # Cosine similarity to the question (1 - cosine distance); higher is more relevant.
     score: float | None = None
+    # ID-HU-BE-016: set by app/qa/source_hierarchy.annotate_sources for answers.
+    source_tier: str | None = None
+    approved: bool | None = None
 
 
 def _min_score(min_score: float | None) -> float | None:

@@ -13,6 +13,7 @@ import type {
   QueryRequest,
   RatioReport,
   RatioRequest,
+  SourceTier,
 } from "./types";
 
 const API_URL = import.meta.env.VITE_API_URL;
@@ -187,6 +188,20 @@ export async function setDocumentConfidentiality(documentId: string, tag: string
     method: "PATCH",
     headers: { "Content-Type": "application/json", ...roleHeaders() },
     body: JSON.stringify({ tag }),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new ApiError(detail || `Update failed with status ${res.status}`, "http", res.status);
+  }
+  return (await res.json()) as DocumentOut;
+}
+
+// ID-HU-BE-016: needs a reviewer role, like approval.
+export async function setDocumentSourceTier(documentId: string, tier: SourceTier): Promise<DocumentOut> {
+  const res = await fetch(`${API_URL}/documents/${documentId}/source-tier`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", ...roleHeaders() },
+    body: JSON.stringify({ tier }),
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => "");

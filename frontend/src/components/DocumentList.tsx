@@ -5,8 +5,10 @@ import {
   deleteDocument,
   listDocuments,
   setDocumentConfidentiality,
+  setDocumentSourceTier,
 } from "../api/client";
-import type { DocumentOut } from "../api/types";
+import { SOURCE_TIER_LABELS } from "../api/types";
+import type { DocumentOut, SourceTier } from "../api/types";
 import DocumentUpload from "./DocumentUpload";
 
 const STATUS_STYLES: Record<string, { background: string; color: string }> = {
@@ -38,6 +40,9 @@ function versionState(doc: DocumentOut): { label: string; style: { background: s
   }
   return null;
 }
+
+// ID-HU-BE-016: source-of-truth hierarchy, most authoritative first.
+const SOURCE_TIERS: SourceTier[] = ["erp_epm", "official_report", "internal_report"];
 
 function confidentialityStyle(tag: string): { background: string; color: string } {
   if (tag === "public") return { background: "#f0fdf4", color: "#15803d" };
@@ -73,6 +78,7 @@ export default function DocumentList({
   const [classifyError, setClassifyError] = useState<{ id: string; message: string } | null>(null);
   const [approvingId, setApprovingId] = useState<string | null>(null);
   const [approveError, setApproveError] = useState<{ id: string; message: string } | null>(null);
+  const [tierError, setTierError] = useState<{ id: string; message: string } | null>(null);
 
   function refresh() {
     setStatus("loading");
@@ -117,6 +123,19 @@ export default function DocumentList({
       });
     } finally {
       setClassifyingId(null);
+    }
+  }
+
+  async function changeSourceTier(documentId: string, tier: SourceTier) {
+    setTierError(null);
+    try {
+      const updated = await setDocumentSourceTier(documentId, tier);
+      setDocuments((prev) => prev.map((doc) => (doc.id === documentId ? updated : doc)));
+    } catch (err) {
+      setTierError({
+        id: documentId,
+        message: err instanceof ApiError ? err.message : "Could not update the source tier.",
+      });
     }
   }
 
@@ -192,7 +211,31 @@ export default function DocumentList({
                   <span style={{ ...badgeStyle, ...confidentialityStyle(doc.confidentiality_tag) }}>
                     {doc.confidentiality_tag}
                   </span>
+                  {doc.source_tier && (
+                    <span style={{ ...badgeStyle, ...tierBadgeStyle }}>{SOURCE_TIER_LABELS[doc.source_tier]}</span>
+                  )}
                 </div>
+
+                {canApprove && doc.source_tier && (
+                  <label style={{ fontSize: "0.8rem", color: "#334155", display: "flex", gap: "0.4rem", alignItems: "center" }}>
+                    Source tier
+                    <select
+                      value={doc.source_tier}
+                      onChange={(e) => changeSourceTier(doc.id, e.target.value as SourceTier)}
+                      aria-label={`Source tier for ${doc.filename}`}
+                      style={selectStyle}
+                    >
+                      {SOURCE_TIERS.map((tier) => (
+                        <option key={tier} value={tier}>
+                          {SOURCE_TIER_LABELS[tier]}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                {tierError?.id === doc.id && (
+                  <div style={{ fontSize: "0.8rem", color: "#b91c1c" }}>{tierError.message}</div>
+                )}
 
                 {canClassify && (
                   <label style={{ fontSize: "0.8rem", color: "#334155", display: "flex", gap: "0.4rem", alignItems: "center" }}>
@@ -352,6 +395,7 @@ const currentBadgeStyle = { background: "#eef2ff", color: "#4338ca" };
 const supersededBadgeStyle = { background: "#f1f5f9", color: "#64748b" };
 const pendingBadgeStyle = { background: "#fff7ed", color: "#c2410c" };
 const approvedBadgeStyle = { background: "#f0fdf4", color: "#15803d" };
+const tierBadgeStyle = { background: "#f5f3ff", color: "#6d28d9" };
 const versionNumberBadgeStyle = { background: "#f8fafc", color: "#334155", border: "1px solid #e2e8f0" };
 
 const approveButtonStyle = {

@@ -190,6 +190,18 @@ class VersionUsed:
     # Set when this version is not its group's default (i.e. the answer was
     # explicitly scoped to an older version for audit).
     current_version_filename: str | None = None
+    # ID-HU-BE-016: the document's place in the source hierarchy.
+    source_tier: str = "internal_report"
+
+
+@dataclass
+class SourceNotice:
+    """ID-HU-BE-016: a draft or lower-tier source behind the answer, or a
+    lower-tier source set aside for a higher-tier one (app/qa/source_hierarchy.py)."""
+
+    kind: str  # "draft" | "lower_tier" | "higher_tier_preferred"
+    message: str
+    document_filenames: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -232,3 +244,4 @@ class GroundedAnswer:
     escalation: EscalationSuggestion | None = None
     restriction_notice: str | None = None
     versions_used: list[VersionUsed] = field(default_factory=list)
+    source_notices: list[SourceNotice] = field(default_factory=list)

@@ -9,6 +9,10 @@ then enforces the grounding guarantee as code, not just as a prompt instruction:
 any statement the model returns without a citation to a real, retrieved source
 is dropped before it ever reaches the analyst.
 
+ID-HU-BE-016: `generate` first sets aside lower-tier sources that give the
+requested figure for the same entity and period as a higher-tier one
+(app/qa/source_hierarchy.py), so the answer comes from the highest tier.
+
 ID-HU-BE-009 adds:
   - `triage`, a short focused LLM call before generation that decides whether
     the question is ambiguous given the retrieved sources (missing entity
@@ -38,6 +42,7 @@ from app.qa.prompts import (
     build_user_prompt,
     label_chunks,
 )
+from app.qa.source_hierarchy import SetAside, set_aside_lower_tiers
 from app.qa.schemas import (
     ConfidenceOut,
     GroundedAnswer,
@@ -68,6 +73,8 @@ class QAState(TypedDict, total=False):
     # Statement rows whose label is exactly what the question asks for
     # (app/qa/statement_rows.py): an answer must agree with them.
     statement_rows: list[RetrievedChunk]
+    # ID-HU-BE-016: lower-tier sources removed in favour of higher-tier ones.
+    set_aside: list[SetAside]
 
 
 def triage_node(state: QAState) -> QAState:
@@ -104,6 +111,9 @@ _GENERIC_FILE_WORDS = {
     "report", "presupuesto", "nomina", "informe", "financial", "statement", "statements", "consolidated",
     "earnings", "release", "results", "annual", "quarterly", "filed", "form", "notes", "notas", "the", "and",
     "del", "las", "los", "usd", "cop", "eur", "draft", "final", "version", "copy", "copia",
+    # Source-system and report-kind words (ID-HU-BE-016): "SAP_Andina_Q2" is Andina's.
+    "erp", "epm", "sap", "export", "exporte", "management", "gerencial", "interno", "internal", "monthly",
+    "mensual", "forecast", "pronostico", "official", "oficial", "audited",
 }
 
 
@@ -238,9 +248,11 @@ def generate_node(state: QAState) -> QAState:
     chunks = state.get("chunks") or []
     if not chunks:
         # Nothing retrieved: don't even call the model, there is nothing to ground on.
-        return {"source_map": {}, "raw_answer": LLMGroundedAnswer(statements=[], unsupported=True)}
+        return {"source_map": {}, "raw_answer": LLMGroundedAnswer(statements=[], unsupported=True), "set_aside": []}
 
     source_map = state.get("source_map") or label_chunks(chunks)
+    # ID-HU-BE-016: the same figure from a higher tier wins.
+    source_map, set_aside = set_aside_lower_tiers(state.get("triage_result") or LLMTriage(), source_map)
     structured_llm = get_chat_model().with_structured_output(LLMGroundedAnswer)
     raw_answer = structured_llm.invoke(
         [
@@ -256,7 +268,7 @@ def generate_node(state: QAState) -> QAState:
             },
         ]
     )
-    return {"source_map": source_map, "raw_answer": raw_answer}
+    return {"source_map": source_map, "raw_answer": raw_answer, "set_aside": set_aside}
 
 
 def _resolve_citation(source_id: str, source_map: dict[str, RetrievedChunk]) -> ResolvedCitation:

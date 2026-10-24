@@ -26,6 +26,66 @@ const citation: CitationOut = {
 };
 
 describe("AnswerMessage", () => {
+  it("warns about draft and lower-tier sources and names the source used (ID-HU-BE-016)", () => {
+    render(
+      <AnswerMessage
+        answer={{
+          ...baseAnswer,
+          grounded: true,
+          statements: [{ text: "Q2 revenue was 1,250,000.", citations: [citation], conflicting: false }],
+          source_notices: [
+            {
+              kind: "draft",
+              message: "Based on a draft document not yet approved: Forecast_2026.xlsx.",
+              document_filenames: ["Forecast_2026.xlsx"],
+            },
+            {
+              kind: "lower_tier",
+              message: "No ERP/EPM source covering this was available, so the answer is based on an internal report.",
+              document_filenames: ["Forecast_2026.xlsx"],
+            },
+          ],
+          versions_used: [
+            {
+              document_id: "doc-1",
+              filename: "Forecast_2026.xlsx",
+              version_number: 1,
+              approval_status: "draft",
+              is_current: true,
+              current_version_filename: null,
+              source_tier: "internal_report",
+            },
+          ],
+        }}
+        onCitationClick={vi.fn()}
+      />
+    );
+    expect(screen.getByRole("note", { name: "Draft source" })).toHaveTextContent("not yet approved: Forecast_2026.xlsx");
+    expect(screen.getByRole("note", { name: "Lower-tier source" })).toHaveTextContent("No ERP/EPM source");
+    expect(screen.getByText(/Based on:/)).toHaveTextContent("Forecast_2026.xlsx (internal report, v1, draft, current)");
+  });
+
+  it("says when a higher-tier source was preferred", () => {
+    render(
+      <AnswerMessage
+        answer={{
+          ...baseAnswer,
+          grounded: true,
+          statements: [{ text: "Q2 revenue was 1,250,000.", citations: [citation], conflicting: false }],
+          source_notices: [
+            {
+              kind: "higher_tier_preferred",
+              message: "Reporte.xlsx (internal report) also covers this figure but wasn't used as the primary source.",
+              document_filenames: ["Reporte.xlsx"],
+            },
+          ],
+        }}
+        onCitationClick={vi.fn()}
+      />
+    );
+    expect(screen.getByRole("note", { name: "Higher-tier source used" })).toHaveTextContent("wasn't used as the primary source");
+  });
+
   it("shows the clarification prompt when needs_clarification is set (ID-HU-BE-009 contract)", () => {
     render(
       <AnswerMessage

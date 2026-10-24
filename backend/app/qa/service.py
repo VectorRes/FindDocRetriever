@@ -12,6 +12,7 @@ from app.qa.conversation import (
 from app.qa.formula_context import add_formula_precedents, explain_formulas
 from app.qa.graph import get_qa_graph
 from app.qa.schemas import GroundedAnswer, GroundedStatement, VersionUsed
+from app.qa.source_hierarchy import annotate_sources, source_notices
 from app.qa.query_expansion import retrieve_with_translation
 from app.qa.statement_rows import statement_rows
 from app.retrieval.service import restricted_match_exists
@@ -37,6 +38,10 @@ def answer_question(
     Sources come from each document's default version (ID-HU-BE-015) unless
     `document_id` scopes the question to one specific version, e.g. a
     superseded one being reviewed for audit.
+
+    ID-HU-BE-016: sources are ranked by tier (ERP/EPM > official report >
+    internal report), the highest tier wins for the same figure, and the
+    answer's `source_notices` flag draft and lower-tier sources.
     """
     session = get_or_create_session(db, session_id)
     history = get_recent_history(db, session.id)
@@ -55,6 +60,7 @@ def answer_question(
     chunks = found.rows + [chunk for chunk in chunks if chunk.chunk_id not in listed]
     # Rows a retrieved formula references, so "how is X calculated?" can be answered.
     chunks = add_formula_precedents(db, chunks, question, user_roles=user_roles, user_id=user_id)
+    chunks = annotate_sources(db, chunks)
     restricted = restricted_match_exists(
         db, question=question, top_k=top_k, user_roles=user_roles, document_id=document_id
     )
@@ -78,6 +84,8 @@ def answer_question(
         answer.statements[first_notice:first_notice] = explanations
     answer.session_id = str(session.id)
     answer.versions_used = describe_versions_used(db, answer.statements)
+    by_document = {chunk.document_id: chunk for chunk in chunks}
+    answer.source_notices = source_notices(answer, by_document, result.get("set_aside") or [])
 
     answer.question = asked
     record_turn(db, session.id, asked, answer)
@@ -106,6 +114,7 @@ def describe_versions_used(db: Session, statements: list[GroundedStatement]) -> 
                 approval_status=document.approval_status,
                 is_current=document.is_current,
                 current_version_filename=current.filename if current is not None else None,
+                source_tier=document.source_tier,
             )
         )
     return versions

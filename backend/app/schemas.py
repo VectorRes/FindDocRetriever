@@ -21,6 +21,8 @@ class DocumentOut(BaseModel):
     version_number: int
     approval_status: str
     approved_at: datetime | None = None
+    # ID-HU-BE-016: "erp_epm" | "official_report" | "internal_report".
+    source_tier: str = "internal_report"
     confidentiality_tag: str
     # Sheet names detected during Excel ingestion (ID-HU-FE-005's "parsing
     # summary"); always empty for PDFs.
@@ -117,6 +119,21 @@ class VersionUsedOut(BaseModel):
     approval_status: str
     is_current: bool
     current_version_filename: str | None = None
+    # ID-HU-BE-016: the document's place in the source hierarchy.
+    source_tier: str = "internal_report"
+
+
+class SourceNoticeOut(BaseModel):
+    """ID-HU-BE-016: what the analyst should know about the answer's sources."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    # "draft": a cited document isn't approved; "lower_tier": a cited source
+    # isn't ERP/EPM (no higher-tier source covered it); "higher_tier_preferred":
+    # a lower-tier source also covered the figure but wasn't used as primary.
+    kind: str
+    message: str
+    document_filenames: list[str] = []
 
 
 class StatementOut(BaseModel):
@@ -174,6 +191,9 @@ class AnswerResponse(BaseModel):
     restriction_notice: str | None = None
     # ID-HU-BE-015: which document version(s) the cited sources came from.
     versions_used: list[VersionUsedOut] = []
+    # ID-HU-BE-016: draft and lower-tier source warnings, and higher-tier
+    # sources preferred over lower-tier ones that also covered the figure.
+    source_notices: list[SourceNoticeOut] = []
 
 
 class CellOut(BaseModel):
@@ -211,6 +231,11 @@ class SupersedeRequest(BaseModel):
 
 class ConfidentialityRequest(BaseModel):
     tag: str
+
+
+class SourceTierRequest(BaseModel):
+    # ID-HU-BE-016: "erp_epm" | "official_report" | "internal_report".
+    tier: str
 
 
 # --- ID-HU-FE-003: cross-document comparison --------------------------------
