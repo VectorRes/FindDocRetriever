@@ -18,6 +18,8 @@ sentence-transformers==3.3.1
 langgraph==0.2.62
 langchain-openai==0.3.35
 langchain-core==0.3.79
+# Tracing of the agent (app/observability.py), self-hosted in docker-compose.
+langfuse==5.0.4
 
 pytest==8.3.4
 httpx==0.28.1

@@ -34,6 +34,9 @@ TEST_DATABASE_URL = _test_database_url()
 os.environ["DATABASE_URL"] = TEST_DATABASE_URL
 # No real model calls from tests: the translation step is tested on its own.
 os.environ["QUERY_TRANSLATION"] = "false"
+# Tests never send traces to the Langfuse configured for development; the
+# tracing tests use their own in-memory client.
+os.environ["LANGFUSE_TRACING_ENABLED"] = "false"
 # RETRIEVAL_MIN_SCORE is calibrated for real embeddings, not the bag-of-words
 # fake below; tests of the relevance floor pass `min_score` explicitly.
 os.environ["RETRIEVAL_MIN_SCORE"] = "0"

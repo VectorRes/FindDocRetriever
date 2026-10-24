@@ -1,3 +1,5 @@
+import atexit
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -10,8 +12,11 @@ from app.api.routes_query import router as query_router
 from app.api.routes_ratios import router as ratios_router
 from app.audit import AuditContextMiddleware
 from app.config import get_settings
+from app.observability import flush as flush_traces
 
 app = FastAPI(title="FinDoc Retriever — Excel & PDF RAG")
+# Send buffered Langfuse spans before the process exits (app/observability.py).
+atexit.register(flush_traces)
 
 # ID-HU-BE-014: a request id and origin for every audit entry of a request.
 app.add_middleware(AuditContextMiddleware)

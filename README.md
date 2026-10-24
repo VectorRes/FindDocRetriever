@@ -443,6 +443,31 @@ Endpoints de clasificación:
 
 Documentación interactiva en `http://localhost:8000/docs`.
 
+## Debugging del agente con Langfuse
+
+Las llamadas del agente se registran en un **Langfuse local** (`app/observability.py`), para ver qué recibió y qué respondió el modelo en cada paso.
+
+**Levantarlo**
+- Langfuse corre en el mismo `docker compose`, bajo el perfil `langfuse`. Incluye la web, el worker, ClickHouse, Redis, MinIO y su propio Postgres; usa unos 2-3 GB de RAM.
+- `COMPOSE_PROFILES=langfuse` en `.env` lo levanta con `docker compose up`. Sin esa línea, Langfuse no arranca.
+- Completa en `.env` `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` (cualquier `pk-lf-…` / `sk-lf-…`) y `LANGFUSE_INIT_USER_EMAIL` / `LANGFUSE_INIT_USER_PASSWORD`, como en `.env.example`. En el primer arranque, Langfuse crea el proyecto con esas llaves y ese usuario.
+- La interfaz está en `http://localhost:3000`; se entra con el usuario de `.env`.
+- Sin llaves, o con `LANGFUSE_TRACING_ENABLED=false`, no se registra nada y la app funciona igual.
+
+**Qué queda registrado**
+- Una **traza por operación**, con el usuario (`X-User-Id`), el rol, la entrada y el resultado:
+  - `qa.answer`: cada pregunta del chat, agrupada por **sesión** de conversación.
+  - `ratios`: `POST /ratios`.
+  - `dashboard.refresh`: el cálculo del dashboard.
+  - `compare`: `POST /compare`.
+- Dentro de `qa.answer`:
+  - `retrieval`: la pregunta traducida y las fuentes recuperadas, con su puntaje, documento, celdas, nivel de fuente (BE-016) y si está aprobada.
+  - `qa_graph`, con sus nodos `triage`, `generate` y `ground_and_validate`.
+  - Cada llamada al modelo: el prompt completo, la respuesta estructurada, los tokens y la latencia.
+- Dentro de `ratios` / `dashboard.refresh`: un `calculate_ratios` por periodo, con el estado de cada ratio y sus entradas faltantes, y cada extracción de cifras. Las extracciones en paralelo quedan dentro de la misma traza.
+
+**Privacidad:** los prompts incluyen el texto de los documentos. Por eso Langfuse corre local y su telemetría está apagada (`TELEMETRY_ENABLED=false`).
+
 ## Frontend
 
 React + Vite (TypeScript) en `frontend/`, servido en `http://localhost:5173` vía el
@@ -589,6 +614,8 @@ docker compose exec api pytest
 - `test_dashboard.py` cubre ID-HU-FE-004: catálogo (empresa, periodos, estados), atípicos y causas, tendencia, datos insuficientes, varias fuentes, resultados guardados y desactualizados, acceso restringido y export a Excel. Ingesta real y extracción guionada.
 - `test_dashboard.py` (`test_be011_*`, `test_trend_endpoint`) y `test_ratios.py` (`test_be011_*`) cubren ID-HU-BE-011: guardado por periodo, ratio no calculable con la entrada faltante, tendencia cronológica de cuatro trimestres con fuentes, trimestre faltante (sin documento o sin una entrada) y el endpoint `/ratios/trend`.
 - `test_source_hierarchy.py` cubre ID-HU-BE-016: el nivel deducido del nombre, apartar la fuente de nivel menor con la misma cifra (y no apartarla si el periodo o la empresa difieren), los avisos de borrador y de nivel menor, el flujo completo de `answer_question` con un modelo guionado (ERP preferido, reporte interno sin ERP, pronóstico en borrador) y el endpoint `PATCH /documents/{id}/source-tier`.
+- `test_observability.py` cubre el tracing con Langfuse, sin servidor (los spans se exportan a memoria): que sin llaves no haga nada, que el usuario y la sesión pasen a los spans anidados, y que los nodos del grafo y las llamadas al modelo queden dentro de la traza de la pregunta. El resto de los tests corre con `LANGFUSE_TRACING_ENABLED=false` (conftest), así nunca envían trazas.
+- `test_embeddings_batching.py` cubre el envío de embeddings por lotes (PDFs grandes).
 - `test_ratios.py` cubre ID-HU-BE-010.
   - **Sin base ni LLM** (extractor falso): cada fórmula contra estados de
     ejemplo, el mapeo de etiquetas, los ratios entre documentos, los ratios

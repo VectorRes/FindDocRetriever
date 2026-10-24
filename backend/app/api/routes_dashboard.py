@@ -13,6 +13,7 @@ from app.dashboard.export import dashboard_workbook
 from app.dashboard.service import DashboardError, get_dashboard, refresh
 from app.db.session import SessionLocal, get_db
 from app.figures.extraction import ExtractionServiceError
+from app.observability import trace
 from app.schemas import (
     CatalogDocumentOut, CatalogEntityOut, DashboardCatalogOut, DashboardOut, DashboardRefreshRequest,
 )
@@ -74,10 +75,12 @@ def refresh_dashboard(
     periods found in its documents by default). Takes a few seconds per
     period: one model call per input, as in POST /ratios."""
     try:
-        return refresh(
-            db, request.entity, periods=request.periods, user_roles=x_user_role, user_id=x_user_id,
-            session_factory=SessionLocal, max_workers=get_settings().ratio_extraction_workers,
-        )
+        with trace("dashboard.refresh", input=request.model_dump(mode="json"), user_id=x_user_id,
+                   metadata={"roles": x_user_role}, tags=["dashboard"]):
+            return refresh(
+                db, request.entity, periods=request.periods, user_roles=x_user_role, user_id=x_user_id,
+                session_factory=SessionLocal, max_workers=get_settings().ratio_extraction_workers,
+            )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except DashboardError as exc:

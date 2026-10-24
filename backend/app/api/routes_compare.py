@@ -11,6 +11,7 @@ from app.db.session import get_db
 from app.figures.comparison import compare_documents
 from app.figures.extraction import ExtractionServiceError
 from app.figures.export import comparison_workbook
+from app.observability import trace
 from app.schemas import CompareRequest, ComparisonOut
 
 router = APIRouter()
@@ -45,10 +46,12 @@ def compare(
         documents.append(document)
 
     try:
-        comparison = compare_documents(
-            db, documents, request.metric.strip(), period=request.period,
-            user_roles=x_user_role, user_id=x_user_id,
-        )
+        with trace("compare", input=request.model_dump(mode="json"), user_id=x_user_id,
+                   metadata={"roles": x_user_role}, tags=["compare"]):
+            comparison = compare_documents(
+                db, documents, request.metric.strip(), period=request.period,
+                user_roles=x_user_role, user_id=x_user_id,
+            )
     except ExtractionServiceError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     db.commit()  # persist the retrieval audit entries (ID-HU-BE-013)

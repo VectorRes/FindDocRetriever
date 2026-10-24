@@ -27,6 +27,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from app.observability import span
 from app.figures.extraction import (
     UNIT_SCALES, ExtractedFigure, ExtractionServiceError, column_of, distinct_periods, entity_key, extract_figure,
     same_entity,
@@ -569,6 +570,23 @@ def calculate_ratios(
     extractor: Extractor = extract_figure,
     session_factory: Callable[[], Session] | None = None,
     max_workers: int = 1,
+) -> RatioReport:
+    with span("calculate_ratios", input={
+        "period": period, "documents": [d.filename for d in documents], "ratios": ratio_keys, "categories": categories,
+    }) as traced:
+        report = _calculate_ratios(
+            db, documents, period, ratio_keys, categories, user_roles, user_id, extractor, session_factory, max_workers,
+        )
+        traced.update(output={
+            "ratios": {r.key: {"status": r.status, "value": r.value, "missing_inputs": r.missing_inputs,
+                               "reasons": r.reasons} for r in report.ratios},
+            "notes": report.notes,
+        })
+    return report
+
+
+def _calculate_ratios(
+    db, documents, period, ratio_keys, categories, user_roles, user_id, extractor, session_factory, max_workers,
 ) -> RatioReport:
     definitions = select_ratios(ratio_keys, categories)
     item_keys = list(dict.fromkeys(key for d in definitions for key in d.inputs))

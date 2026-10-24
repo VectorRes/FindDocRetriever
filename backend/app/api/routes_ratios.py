@@ -8,6 +8,7 @@ from app.config import get_settings
 from app.dashboard.service import DashboardError, get_trend
 from app.db.models import Document
 from app.db.session import SessionLocal, get_db
+from app.observability import trace
 from app.figures.extraction import ExtractionServiceError
 from app.ratios.engine import calculate_ratios
 from app.ratios.formulas import RATIOS
@@ -77,11 +78,13 @@ def compute_ratios(
         documents.append(document)
 
     try:
-        report = calculate_ratios(
-            db, documents, period=request.period, ratio_keys=request.ratios,
-            categories=request.categories, user_roles=x_user_role, user_id=x_user_id,
-            session_factory=SessionLocal, max_workers=get_settings().ratio_extraction_workers,
-        )
+        with trace("ratios", input=request.model_dump(mode="json"), user_id=x_user_id,
+                   metadata={"roles": x_user_role}, tags=["ratios"]):
+            report = calculate_ratios(
+                db, documents, period=request.period, ratio_keys=request.ratios,
+                categories=request.categories, user_roles=x_user_role, user_id=x_user_id,
+                session_factory=SessionLocal, max_workers=get_settings().ratio_extraction_workers,
+            )
     except ExtractionServiceError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except ValueError as exc:

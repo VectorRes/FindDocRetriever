@@ -3,6 +3,7 @@ from functools import lru_cache
 from langchain_openai import ChatOpenAI
 
 from app.config import get_settings
+from app.observability import langchain_callbacks
 
 
 @lru_cache
@@ -20,4 +21,7 @@ def get_chat_model() -> ChatOpenAI:
         model=settings.openai_chat_model,
         api_key=settings.openai_api_key,
         temperature=settings.qa_temperature,
+        # Every call traced in Langfuse when it's configured (app/observability.py),
+        # also the ones outside the QA graph (figure extraction, translation).
+        callbacks=langchain_callbacks(),
     )

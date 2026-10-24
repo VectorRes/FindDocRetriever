@@ -63,6 +63,14 @@ class Settings(BaseSettings):
     # Most periods one dashboard refresh calculates (each costs model calls).
     dashboard_max_periods: int = 8
 
+    # Tracing of the agent with Langfuse (app/observability.py): off unless
+    # both keys are set. The base URL is the self-hosted langfuse-web service.
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: str | None = None
+    langfuse_base_url: str = "http://langfuse-web:3000"
+    langfuse_environment: str = "development"
+    langfuse_tracing_enabled: bool = True
+
     # Comma-separated list of origins allowed to call the API (the frontend dev server, etc.)
     cors_allowed_origins_raw: str = "http://localhost:5173"
 
