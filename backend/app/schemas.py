@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -534,3 +535,100 @@ class RatioTrendOut(BaseModel):
     description: str
     points: list[DashboardPointOut]
     notes: list[str] = []
+
+
+# --- ID-HU-INT-001: repository sync (SharePoint, Google Drive) ----------------
+
+class SyncSourceIn(BaseModel):
+    kind: Literal["sharepoint", "google_drive"]
+    name: str = Field(min_length=1, max_length=255)
+    # sharepoint: {"site_url", "library", "folder_path"}; google_drive:
+    # {"folder_id"}; both: {"include_subfolders": bool}.
+    config: dict = Field(default_factory=dict)
+    # Applied to every document synced from the folder.
+    confidentiality_tag: str = "internal"
+    source_tier: str | None = None
+    auto_approve: bool = False
+    enabled: bool = True
+    # A signed-in account (Repositories tab) to sync with, instead of service credentials.
+    account_id: UUID | None = None
+
+
+class SyncSourceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    kind: str
+    name: str
+    config: dict
+    confidentiality_tag: str
+    source_tier: str | None = None
+    auto_approve: bool
+    enabled: bool
+    created_at: datetime
+    last_sync_at: datetime | None = None
+    last_status: str | None = None
+    last_error: str | None = None
+    # {"new", "updated", "unchanged", "failed", "skipped"} of the last run.
+    last_summary: dict = {}
+    file_count: int = 0
+    account_id: UUID | None = None
+    account_email: str | None = None
+
+
+class SyncOverviewOut(BaseModel):
+    interval_minutes: int
+    running: bool
+    next_run_at: datetime | None = None
+    sources: list[SyncSourceOut]
+
+
+class SyncedFileOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    remote_id: str
+    path: str
+    version_tag: str
+    remote_modified_at: datetime | None = None
+    document_id: UUID | None = None
+    status: str  # "ingested" | "failed"
+    error: str | None = None
+    synced_at: datetime
+
+
+class SyncRunOut(BaseModel):
+    started: bool
+
+
+class OAuthProviderOut(BaseModel):
+    provider: str  # "google" | "microsoft"
+    label: str
+    kind: str  # the sync source kind its folders become
+    configured: bool
+    # To register in the provider's OAuth app.
+    redirect_uri: str
+
+
+class OAuthStartOut(BaseModel):
+    authorize_url: str
+
+
+class RepositoryAccountOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    provider: str
+    email: str
+    display_name: str | None = None
+    connected_by: str
+    created_at: datetime
+
+
+class FolderNodeOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    name: str
+    selectable: bool
+    config: dict = {}
+    browsable: bool = True

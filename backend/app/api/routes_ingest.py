@@ -9,15 +9,10 @@ from sqlalchemy.orm import Session
 
 from app.db.models import Document
 from app.db.session import get_db
-from app.ingestion.service import ingest_excel_file, ingest_pdf_file
+from app.ingestion.service import ALLOWED_EXTENSIONS, ingest_path
 from app.schemas import DocumentOut
-from app.storage import save_document_file
 
 router = APIRouter()
-
-EXCEL_EXTENSIONS = {".xlsx", ".xlsm"}
-PDF_EXTENSIONS = {".pdf"}
-ALLOWED_EXTENSIONS = EXCEL_EXTENSIONS | PDF_EXTENSIONS
 
 
 @router.post("/ingest", response_model=DocumentOut)
@@ -46,21 +41,7 @@ async def ingest_document(
         tmp_path = Path(tmp.name)
 
     try:
-        if suffix in PDF_EXTENSIONS:
-            document = ingest_pdf_file(
-                db, filename=file.filename, file_path=tmp_path, version_of=previous_version
-            )
-        else:
-            document = ingest_excel_file(
-                db, filename=file.filename, file_path=tmp_path, version_of=previous_version
-            )
-
-        # Persist the original bytes regardless of ingestion outcome — the
-        # Source Verification Panel's "open original file" and PDF viewer
-        # need the real file, not just what got extracted into the DB.
-        document.storage_path = save_document_file(document.id, suffix, tmp_path)
-        db.commit()
-        db.refresh(document)
+        document = ingest_path(db, file.filename, tmp_path, version_of=previous_version)
     finally:
         tmp_path.unlink(missing_ok=True)
 

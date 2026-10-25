@@ -10,10 +10,18 @@ import type {
   DocumentListOut,
   DocumentOut,
   DocumentResolutionOut,
+  FolderNode,
+  OAuthProvider,
+  OAuthProviderInfo,
   QueryRequest,
   RatioReport,
   RatioRequest,
+  RepositoryAccount,
   SourceTier,
+  SyncedFile,
+  SyncOverview,
+  SyncSource,
+  SyncSourceRequest,
 } from "./types";
 
 const API_URL = import.meta.env.VITE_API_URL;
@@ -453,4 +461,67 @@ export async function exportDashboard(dashboard: Dashboard): Promise<Blob> {
     throw new ApiError(`Export failed with status ${res.status}`, "http", res.status);
   }
   return res.blob();
+}
+
+// --- ID-HU-INT-001: repository sync and Google / Microsoft sign-in ---
+
+async function sendJson<T>(method: string, path: string, body?: unknown): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}${path}`, {
+      method,
+      headers: { "Content-Type": "application/json", ...roleHeaders() },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch {
+    throw new ApiError("Could not reach the FinDoc Retriever API.", "network");
+  }
+  if (!res.ok) {
+    const detail = await readErrorDetail(res);
+    throw new ApiError(detail || `Request failed with status ${res.status}`, "http", res.status);
+  }
+  return (res.status === 204 ? undefined : await res.json()) as T;
+}
+
+export function getOAuthProviders(): Promise<OAuthProviderInfo[]> {
+  return getJson("/oauth/providers");
+}
+
+// The provider's sign-in page; the caller sends the browser there.
+export async function startSignIn(provider: OAuthProvider): Promise<string> {
+  const { authorize_url } = await sendJson<{ authorize_url: string }>("GET", `/oauth/${provider}/start`);
+  return authorize_url;
+}
+
+export function listRepositoryAccounts(): Promise<RepositoryAccount[]> {
+  return sendJson("GET", "/repository-accounts");
+}
+
+export function disconnectRepositoryAccount(accountId: string): Promise<void> {
+  return sendJson("DELETE", `/repository-accounts/${accountId}`);
+}
+
+export function browseFolders(accountId: string, parent?: string): Promise<FolderNode[]> {
+  const query = parent ? `?parent=${encodeURIComponent(parent)}` : "";
+  return sendJson("GET", `/repository-accounts/${accountId}/folders${query}`);
+}
+
+export function getSyncOverview(): Promise<SyncOverview> {
+  return sendJson("GET", "/sync/sources");
+}
+
+export function connectFolder(request: SyncSourceRequest): Promise<SyncSource> {
+  return sendJson("POST", "/sync/sources", request);
+}
+
+export function disconnectFolder(sourceId: string): Promise<void> {
+  return sendJson("DELETE", `/sync/sources/${sourceId}`);
+}
+
+export function runSync(sourceId?: string): Promise<{ started: boolean }> {
+  return sendJson("POST", `/sync/run${sourceId ? `?source_id=${sourceId}` : ""}`);
+}
+
+export function listSyncedFiles(sourceId: string): Promise<SyncedFile[]> {
+  return sendJson("GET", `/sync/sources/${sourceId}/files`);
 }

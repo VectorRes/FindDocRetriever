@@ -107,7 +107,12 @@ def span(name: str, *, input: Any = None, as_type: str = "span") -> Iterator[Any
 
 
 def flush() -> None:
-    """Send what's buffered (on shutdown; spans are otherwise sent in batches)."""
+    """Send what's buffered (on shutdown; spans are otherwise sent in batches).
+    Only an already-created client: creating one while the interpreter shuts
+    down fails."""
+    cache_info = getattr(_client, "cache_info", None)
+    if cache_info is not None and cache_info().currsize == 0:
+        return
     client = _client()
     if client is not None:
         client.flush()

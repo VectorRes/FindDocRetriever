@@ -18,16 +18,18 @@ import ComparisonView from "./components/ComparisonView";
 import DashboardView from "./components/DashboardView";
 import DocumentList from "./components/DocumentList";
 import RatiosView from "./components/RatiosView";
+import RepositoriesView from "./components/RepositoriesView";
 import SourceVerificationPanel from "./components/SourceVerificationPanel";
 
 type ApiStatus = "checking" | "online" | "offline";
-type View = "chat" | "compare" | "ratios" | "dashboard" | "audit";
+type View = "chat" | "compare" | "ratios" | "dashboard" | "repositories" | "audit";
 
 const VIEW_LABELS: Record<View, string> = {
   chat: "Chat",
   compare: "Compare",
   ratios: "Ratios",
   dashboard: "Dashboard",
+  repositories: "Repositories",
   audit: "Audit",
 };
 
@@ -60,13 +62,21 @@ export default function App() {
     // The open source panel was resolved under the previous role's access.
     setSelectedCitation(null);
     if (!AUDITOR_ROLES.includes(next)) setView((current) => (current === "audit" ? "chat" : current));
+    if (!APPROVER_ROLES.includes(next)) setView((current) => (current === "repositories" ? "chat" : current));
   }
 
   // ID-HU-BE-014: the audit trail tab is only offered to administrators.
   const canAudit = AUDITOR_ROLES.includes(role);
-  const views: View[] = canAudit
-    ? ["chat", "compare", "ratios", "dashboard", "audit"]
-    : ["chat", "compare", "ratios", "dashboard"];
+  // ID-HU-INT-001: connecting repositories, like approving versions, is for reviewers.
+  const canManageRepositories = APPROVER_ROLES.includes(role);
+  const views: View[] = [
+    "chat",
+    "compare",
+    "ratios",
+    "dashboard",
+    ...(canManageRepositories ? (["repositories"] as View[]) : []),
+    ...(canAudit ? (["audit"] as View[]) : []),
+  ];
 
   useEffect(() => {
     getHealth()
@@ -162,6 +172,11 @@ export default function App() {
         <div hidden={view !== "dashboard"} style={{ flex: 1, minWidth: 0 }}>
           <DashboardView onCitationClick={setSelectedCitation} active={view === "dashboard"} />
         </div>
+        {canManageRepositories && (
+          <div className="no-print" hidden={view !== "repositories"} style={{ flex: 1, minWidth: 0 }}>
+            <RepositoriesView active={view === "repositories"} />
+          </div>
+        )}
         {canAudit && (
           <div className="no-print" hidden={view !== "audit"} style={{ flex: 1, minWidth: 0 }}>
             <AuditView active={view === "audit"} />

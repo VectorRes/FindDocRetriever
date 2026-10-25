@@ -385,3 +385,90 @@ export interface Dashboard {
   ratios: DashboardRatio[];
   notes: string[];
 }
+
+// --- ID-HU-INT-001: repository sync (SharePoint / Google Drive) ---
+
+export type OAuthProvider = "google" | "microsoft";
+export type SyncKind = "sharepoint" | "google_drive";
+
+export interface OAuthProviderInfo {
+  provider: OAuthProvider;
+  label: string;
+  kind: SyncKind;
+  configured: boolean;
+  // To register in the provider's OAuth app.
+  redirect_uri: string;
+}
+
+export interface RepositoryAccount {
+  id: string;
+  provider: OAuthProvider;
+  email: string;
+  display_name: string | null;
+  connected_by: string;
+  created_at: string;
+}
+
+export interface FolderNode {
+  id: string;
+  name: string;
+  // Can be connected, with this config for POST /sync/sources.
+  selectable: boolean;
+  config: Record<string, unknown>;
+  browsable: boolean;
+}
+
+export interface SyncSummary {
+  new?: number;
+  updated?: number;
+  unchanged?: number;
+  failed?: number;
+  skipped?: number;
+}
+
+export interface SyncSource {
+  id: string;
+  kind: SyncKind;
+  name: string;
+  config: Record<string, unknown>;
+  confidentiality_tag: string;
+  source_tier: SourceTier | null;
+  auto_approve: boolean;
+  enabled: boolean;
+  created_at: string;
+  last_sync_at: string | null;
+  last_status: "ok" | "error" | null;
+  last_error: string | null;
+  last_summary: SyncSummary;
+  file_count: number;
+  account_id: string | null;
+  account_email: string | null;
+}
+
+export interface SyncOverview {
+  interval_minutes: number;
+  running: boolean;
+  next_run_at: string | null;
+  sources: SyncSource[];
+}
+
+export interface SyncSourceRequest {
+  kind: SyncKind;
+  name: string;
+  config: Record<string, unknown>;
+  confidentiality_tag?: string;
+  source_tier?: SourceTier | null;
+  auto_approve?: boolean;
+  account_id?: string;
+}
+
+export interface SyncedFile {
+  remote_id: string;
+  path: string;
+  version_tag: string;
+  remote_modified_at: string | null;
+  document_id: string | null;
+  status: "ingested" | "failed";
+  error: string | null;
+  synced_at: string;
+}

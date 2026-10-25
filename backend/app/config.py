@@ -71,6 +71,42 @@ class Settings(BaseSettings):
     langfuse_environment: str = "development"
     langfuse_tracing_enabled: bool = True
 
+    # ID-HU-INT-001: automatic sync of connected SharePoint / Google Drive
+    # folders (app/sync/). Every this many minutes the API checks every
+    # connected folder for new and updated files; 0 turns the scheduler off
+    # (POST /sync/run still syncs on demand).
+    sync_interval_minutes: int = 15
+    # SharePoint, through Microsoft Graph with an Entra ID (Azure AD) app
+    # registration: client-credentials flow, application permission
+    # Sites.Read.All (or Sites.Selected).
+    sharepoint_tenant_id: str | None = None
+    sharepoint_client_id: str | None = None
+    sharepoint_client_secret: str | None = None
+    # Google Drive, through a service account the folders are shared with
+    # (read-only scope): the path to its JSON key, or the JSON itself.
+    google_service_account_file: str | None = None
+    google_service_account_json: str | None = None
+    # Or, instead of service credentials, a reviewer signs in with Google or
+    # Microsoft (OAuth) in the Repositories tab and picks the folders; the
+    # sync then uses that account's access (app/sync/oauth.py). These are the
+    # OAuth apps' client credentials; redirect URIs to register:
+    #   {OAUTH_REDIRECT_BASE_URL}/oauth/google/callback
+    #   {OAUTH_REDIRECT_BASE_URL}/oauth/microsoft/callback
+    google_oauth_client_id: str | None = None
+    google_oauth_client_secret: str | None = None
+    microsoft_oauth_client_id: str | None = None
+    microsoft_oauth_client_secret: str | None = None
+    # "organizations" (any work/school account), "common" (also personal
+    # Microsoft accounts) or a tenant id.
+    microsoft_oauth_tenant: str = "organizations"
+    oauth_redirect_base_url: str = "http://localhost:8000"
+    # Where the callback sends the browser back to.
+    frontend_url: str = "http://localhost:5173"
+    # Fernet key that encrypts the accounts' tokens at rest; it also signs the
+    # OAuth state. Generate with:
+    #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    token_encryption_key: str | None = None
+
     # Comma-separated list of origins allowed to call the API (the frontend dev server, etc.)
     cors_allowed_origins_raw: str = "http://localhost:5173"
 

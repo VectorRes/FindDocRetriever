@@ -162,3 +162,27 @@ def ingest_pdf_file(
     db.commit()
     db.refresh(document)
     return document
+
+
+EXCEL_EXTENSIONS = {".xlsx", ".xlsm"}
+PDF_EXTENSIONS = {".pdf"}
+ALLOWED_EXTENSIONS = EXCEL_EXTENSIONS | PDF_EXTENSIONS
+
+
+def ingest_path(db: Session, filename: str, file_path: Path, version_of: Document | None = None) -> Document:
+    """Ingest the file at `file_path` (an upload, or a file synced from a
+    repository) as `filename`, and keep its original bytes: the Source
+    Verification Panel's "open original file" and PDF viewer need the real
+    file, not just what got extracted. Commits."""
+    from app.storage import save_document_file
+
+    suffix = Path(filename).suffix.lower()
+    if suffix not in ALLOWED_EXTENSIONS:
+        raise ValueError(f"Unsupported file type: {suffix}")
+    ingest = ingest_pdf_file if suffix in PDF_EXTENSIONS else ingest_excel_file
+    document = ingest(db, filename=filename, file_path=file_path, version_of=version_of)
+    # Kept regardless of the ingestion outcome.
+    document.storage_path = save_document_file(document.id, suffix, file_path)
+    db.commit()
+    db.refresh(document)
+    return document

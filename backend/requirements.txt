@@ -20,6 +20,8 @@ langchain-openai==0.3.35
 langchain-core==0.3.79
 # Tracing of the agent (app/observability.py), self-hosted in docker-compose.
 langfuse==5.0.4
+# ID-HU-INT-001: Google Drive service-account sign-in (SharePoint uses httpx).
+google-auth==2.62.0
 
 pytest==8.3.4
 httpx==0.28.1

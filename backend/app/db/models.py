@@ -340,3 +340,94 @@ class RatioSnapshot(Base):
     missing_inputs: Mapped[list] = mapped_column(JSON, default=list)
 
     run: Mapped["DashboardRun"] = relationship(back_populates="snapshots")
+
+
+class RepositoryAccount(Base):
+    """A Google or Microsoft account a reviewer signed in with (OAuth) to
+    connect folders without service credentials (ID-HU-INT-001). Folders
+    connected through it are synced with its access. Tokens are encrypted at
+    rest (TOKEN_ENCRYPTION_KEY, app/sync/oauth.py); the access token is
+    renewed from the refresh token when it expires."""
+
+    __tablename__ = "repository_accounts"
+    __table_args__ = (UniqueConstraint("provider", "email", name="uq_repository_account_provider_email"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    provider: Mapped[str] = mapped_column(String(32))  # "google" | "microsoft"
+    email: Mapped[str] = mapped_column(String(320))
+    display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    refresh_token: Mapped[str] = mapped_column(Text)  # encrypted
+    access_token: Mapped[str | None] = mapped_column(Text, nullable=True)  # encrypted
+    access_token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    scopes: Mapped[str] = mapped_column(Text, default="")
+    connected_by: Mapped[str] = mapped_column(String(255), default="anonymous")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class SyncSource(Base):
+    """A connected repository folder that is synced automatically (ID-HU-INT-001):
+    a SharePoint document-library folder or a Google Drive folder.
+
+    Credentials aren't stored here: they come from the environment
+    (SHAREPOINT_*, GOOGLE_SERVICE_ACCOUNT_*). `config` says which folder:
+      - sharepoint:   {"site_url", "library", "folder_path"}
+      - google_drive: {"folder_id"}
+    plus {"include_subfolders": bool} for both. New and updated files are
+    ingested with this source's classification, tier and approval settings."""
+
+    __tablename__ = "sync_sources"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    kind: Mapped[str] = mapped_column(String(32))  # "sharepoint" | "google_drive"
+    name: Mapped[str] = mapped_column(String(255))
+    config: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Applied to every document ingested from this folder.
+    confidentiality_tag: Mapped[str] = mapped_column(String(64), default="internal")
+    # ID-HU-BE-016 tier; None = inferred from the file name.
+    source_tier: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Approve each synced version (the folder only holds approved documents),
+    # so an update replaces the previous approved version right away.
+    auto_approve: Mapped[bool] = mapped_column(Boolean, default=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # "ok" | "error" | None (never synced), and why it failed.
+    last_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Counts of the last run: {"new", "updated", "unchanged", "failed", "skipped"}.
+    last_summary: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    # Set when the folder was connected through a signed-in account (OAuth):
+    # synced with that account's access instead of service credentials.
+    # Disconnecting the account disconnects its folders (documents are kept).
+    account_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("repository_accounts.id", ondelete="CASCADE"), nullable=True
+    )
+
+    files: Mapped[list["SyncedFile"]] = relationship(back_populates="source", cascade="all, delete-orphan")
+    account: Mapped["RepositoryAccount | None"] = relationship()
+
+
+class SyncedFile(Base):
+    """One file of a SyncSource as last seen, and the document it became.
+    A file is re-ingested when its version tag changes (SharePoint cTag,
+    Google Drive md5 checksum / modified time)."""
+
+    __tablename__ = "synced_files"
+    __table_args__ = (UniqueConstraint("source_id", "remote_id", name="uq_synced_file_source_remote"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    source_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("sync_sources.id", ondelete="CASCADE"), index=True)
+    remote_id: Mapped[str] = mapped_column(String(255))
+    path: Mapped[str] = mapped_column(Text)
+    version_tag: Mapped[str] = mapped_column(String(255))
+    remote_modified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    document_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("documents.id", ondelete="SET NULL"), nullable=True
+    )
+    # "ingested" | "failed" (retried on the next sync).
+    status: Mapped[str] = mapped_column(String(16))
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    source: Mapped["SyncSource"] = relationship(back_populates="files")

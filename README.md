@@ -443,6 +443,86 @@ Endpoints de clasificación:
 
 Documentación interactiva en `http://localhost:8000/docs`.
 
+## Sincronización con SharePoint y Google Drive (ID-HU-INT-001)
+
+Los archivos nuevos o editados en una carpeta conectada de SharePoint o Google Drive se ingieren solos (`app/sync/`), sin volver a subirlos a mano.
+
+### Desde la pestaña "Repositories" (iniciando sesión con Google o Microsoft)
+
+**Uso:**
+1. Con un rol aprobador (`reviewer`, `financial-controller`, `restricted-reviewer` o `admin`), abre la pestaña **Repositories**.
+2. Pulsa **Sign in with Google** o **Sign in with Microsoft** e inicia sesión con tu cuenta.
+3. Al volver, pulsa **Add folders** y navega:
+   - Google: My Drive, Shared with me y las unidades compartidas.
+   - Microsoft: My OneDrive, o SharePoint sites → sitio → biblioteca → carpetas.
+4. Pulsa **Connect** en la carpeta y elige la clasificación, si incluye subcarpetas y si se aprueban los documentos solos. Se sincroniza enseguida.
+5. Después se sincroniza cada `SYNC_INTERVAL_MINUTES`, con el acceso de esa cuenta. Allí mismo ves cada sincronización (nuevos, actualizados, errores) y los archivos.
+
+**Configuración (una sola vez, el administrador):**
+- **Google:**
+  1. En Google Cloud Console, crea un proyecto, habilita la **Google Drive API** y configura la **pantalla de consentimiento OAuth**. Con tipo *External* en modo prueba, agrega a los usuarios de prueba.
+  2. Crea credenciales → **ID de cliente OAuth** → *Aplicación web*, con el URI de redirección `http://localhost:8000/oauth/google/callback`.
+  3. Copia el ID y el secreto en `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET`.
+- **Microsoft:**
+  1. En el portal de Azure → Entra ID → **App registrations** → *New registration*, de tipo *Web*, con el URI de redirección `http://localhost:8000/oauth/microsoft/callback`.
+  2. En *API permissions*, agrega los permisos **delegados** de Microsoft Graph: `Files.Read.All`, `Sites.Read.All`, `User.Read` y `offline_access`. Algunas organizaciones exigen consentimiento de administrador.
+  3. En *Certificates & secrets*, crea un secreto. Copia el ID de la aplicación y el secreto en `MICROSOFT_OAUTH_CLIENT_ID` / `MICROSOFT_OAUTH_CLIENT_SECRET`.
+  4. `MICROSOFT_OAUTH_TENANT`: `organizations` (por defecto), `common` o el ID del tenant.
+- **Cifrado:** `TOKEN_ENCRYPTION_KEY` (una clave Fernet) cifra los tokens guardados y firma el `state` del inicio de sesión. Si se cambia, hay que volver a iniciar sesión con las cuentas.
+- Reinicia la API: `docker compose up -d api`.
+
+**Seguridad:**
+- Los permisos pedidos son solo de lectura.
+- Los tokens se guardan cifrados y el de acceso se renueva solo. Microsoft rota el refresh token y se guarda el nuevo.
+- El `state` va firmado y vence en 10 minutos, contra CSRF.
+- **Disconnect** en una cuenta olvida sus tokens y desconecta sus carpetas; los documentos se mantienen.
+- La sincronización depende de esa cuenta: si pierde el acceso o revoca el permiso, la carpeta muestra el error.
+
+Endpoints:
+- `GET /oauth/providers`.
+- `GET /oauth/{google|microsoft}/start` y `GET /oauth/{google|microsoft}/callback`.
+- `GET /repository-accounts`, `DELETE /repository-accounts/{id}`.
+- `GET /repository-accounts/{id}/folders?parent=…`.
+- `POST /sync/sources` con `account_id`.
+
+### Con credenciales de servicio (sin iniciar sesión)
+
+**Credenciales** (en `.env`, ver `.env.example`):
+- **SharePoint:** un registro de aplicación en Entra ID (Azure AD) con el permiso de aplicación de Microsoft Graph `Sites.Read.All` (o `Sites.Selected`) y consentimiento de administrador. Se completa `SHAREPOINT_TENANT_ID`, `SHAREPOINT_CLIENT_ID` y `SHAREPOINT_CLIENT_SECRET`; se autentica con client credentials.
+- **Google Drive:** una cuenta de servicio con la Drive API habilitada, con cada carpeta compartida con su correo como lector. Se completa `GOOGLE_SERVICE_ACCOUNT_FILE` (ruta al JSON dentro del contenedor) o `GOOGLE_SERVICE_ACCOUNT_JSON`.
+
+**Conectar una carpeta** (`POST /sync/sources`, requiere un rol aprobador):
+
+```json
+{"kind": "sharepoint", "name": "Corporate Finance/Q3 Reports",
+ "config": {"site_url": "https://contoso.sharepoint.com/sites/Finance", "library": "Documents",
+            "folder_path": "Corporate Finance/Q3 Reports", "include_subfolders": false},
+ "confidentiality_tag": "internal", "source_tier": null, "auto_approve": false}
+```
+
+- Para Google Drive: `{"kind": "google_drive", "config": {"folder_id": "<id o URL de la carpeta>"}}`.
+- `confidentiality_tag` (por defecto `internal`) se aplica a cada documento sincronizado, para que los analistas lo puedan consultar enseguida.
+- `source_tier` fija el nivel de fuente (BE-016). Sin él, se deduce del nombre del archivo.
+- `auto_approve` aprueba cada versión sincronizada, para carpetas que solo tienen documentos aprobados. Así una edición reemplaza a la versión aprobada anterior de inmediato. Sin él, la regla de BE-015 se mantiene: un borrador nuevo solo reemplaza a otro borrador.
+
+**Cómo sincroniza** (`app/sync/service.py`):
+- Cada `SYNC_INTERVAL_MINUTES` (15 por defecto; 0 lo apaga) se revisan **todas** las carpetas conectadas, de SharePoint y de Google Drive. La primera revisión es 10 s después de arrancar la API.
+- Un candado de Postgres evita dos sincronizaciones a la vez.
+- Cada archivo se recuerda con una marca de versión: el `cTag` de SharePoint, que cambia solo con el contenido, o el `md5Checksum` de Drive.
+  - **Archivo nuevo:** se ingiere.
+  - **Marca cambiada:** se ingiere como **nueva versión** del mismo documento (BE-015), y la copia vieja deja de responder.
+  - **Marca igual:** no se descarga.
+- Solo se sincronizan `.xlsx`, `.xlsm` y `.pdf`. Las hojas de Google Sheets se exportan como `.xlsx`.
+- Un archivo que falla queda registrado con el motivo y se reintenta en la siguiente sincronización.
+- Borrar un archivo del repositorio no lo borra de FinDoc.
+
+**Endpoints** (todos requieren un rol aprobador; si no, 403):
+- `GET /sync/sources`: las carpetas con su última sincronización (`last_status`, `last_error`, `last_summary` con nuevos, actualizados, sin cambios, fallidos y omitidos), el intervalo y si hay una sincronización en curso.
+- `POST /sync/sources`: conecta una carpeta. Responde 400 si falta `site_url` o `folder_id`, o si la clasificación o el nivel no existen.
+- `DELETE /sync/sources/{id}`: la desconecta; los documentos ya ingeridos se mantienen.
+- `GET /sync/sources/{id}/files`: cada archivo con su documento, o con el error.
+- `POST /sync/run[?source_id=…]`: sincroniza ya, en segundo plano (202).
+
 ## Debugging del agente con Langfuse
 
 Las llamadas del agente se registran en un **Langfuse local** (`app/observability.py`), para ver qué recibió y qué respondió el modelo en cada paso.
@@ -616,6 +696,11 @@ docker compose exec api pytest
 - `test_source_hierarchy.py` cubre ID-HU-BE-016: el nivel deducido del nombre, apartar la fuente de nivel menor con la misma cifra (y no apartarla si el periodo o la empresa difieren), los avisos de borrador y de nivel menor, el flujo completo de `answer_question` con un modelo guionado (ERP preferido, reporte interno sin ERP, pronóstico en borrador) y el endpoint `PATCH /documents/{id}/source-tier`.
 - `test_observability.py` cubre el tracing con Langfuse, sin servidor (los spans se exportan a memoria): que sin llaves no haga nada, que el usuario y la sesión pasen a los spans anidados, y que los nodos del grafo y las llamadas al modelo queden dentro de la traza de la pregunta. El resto de los tests corre con `LANGFUSE_TRACING_ENABLED=false` (conftest), así nunca envían trazas.
 - `test_embeddings_batching.py` cubre el envío de embeddings por lotes (PDFs grandes).
+- `test_sync.py` cubre ID-HU-INT-001:
+  - **Conectores contra Graph y la Drive API simulados** (`httpx.MockTransport`): inicio de sesión, búsqueda del sitio y la biblioteca, paginación, subcarpetas, descargas y exportación de Google Sheets.
+  - **Sincronización con un repositorio falso e ingesta real:** archivo nuevo de SharePoint y de Drive consultable enseguida, archivo editado que pasa a ser nueva versión (la copia vieja deja de responder), archivos sin cambios que no se descargan, ambos repositorios en una sola corrida, fallo y reintento, archivos omitidos, repositorio inaccesible, aprobación automática y candado.
+  - **El programador** de sincronizaciones y la API.
+- `test_oauth.py` cubre el inicio de sesión con Google y Microsoft contra proveedores simulados: el `state` firmado (falsificado, vencido o de otro proveedor), las URLs de inicio de sesión, el guardado de la cuenta con tokens cifrados, la renovación del token y la rotación del refresh token, el navegador de carpetas, la sincronización con el token de la cuenta y la API (callback, conectar y desconectar). `RepositoriesView.test.tsx` cubre la pestaña.
 - `test_ratios.py` cubre ID-HU-BE-010.
   - **Sin base ni LLM** (extractor falso): cada fórmula contra estados de
     ejemplo, el mapeo de etiquetas, los ratios entre documentos, los ratios
