@@ -146,7 +146,11 @@ def test_sign_in_urls(settings):
 
 
 def test_sign_in_isnt_offered_without_the_oauth_app(monkeypatch):
-    monkeypatch.setattr(oauth, "get_settings", lambda: Settings(token_encryption_key=KEY))
+    # Explicitly unset: the development .env may have real OAuth apps configured.
+    monkeypatch.setattr(oauth, "get_settings", lambda: Settings(
+        token_encryption_key=KEY, google_oauth_client_id=None, google_oauth_client_secret=None,
+        microsoft_oauth_client_id=None, microsoft_oauth_client_secret=None,
+    ))
     assert oauth.configured_providers() == {"google": False, "microsoft": False}
     with pytest.raises(oauth.OAuthError, match="GOOGLE_OAUTH_CLIENT_ID"):
         oauth.authorization_url("google", "ana")

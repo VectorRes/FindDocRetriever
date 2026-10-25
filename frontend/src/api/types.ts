@@ -424,6 +424,20 @@ export interface SyncSummary {
   unchanged?: number;
   failed?: number;
   skipped?: number;
+  // ID-HU-INT-002
+  permissions_changed?: number;
+  removed?: number;
+  restored?: number;
+  // ID-HU-INT-003
+  retry_pending?: number;
+  needs_review?: number;
+}
+
+// ID-HU-INT-002: a repository group or user (or "anyone" / "organization" /
+// "domain:<domain>") and the FinDoc classification it stands for.
+export interface PermissionRule {
+  principal: string;
+  tag: string;
 }
 
 export interface SyncSource {
@@ -443,6 +457,7 @@ export interface SyncSource {
   file_count: number;
   account_id: string | null;
   account_email: string | null;
+  permission_rules: PermissionRule[];
 }
 
 export interface SyncOverview {
@@ -450,6 +465,27 @@ export interface SyncOverview {
   running: boolean;
   next_run_at: string | null;
   sources: SyncSource[];
+  // ID-HU-INT-003: files flagged for manual review, unresolved failures.
+  needs_review: number;
+  open_failures: number;
+  retry_max_attempts: number;
+}
+
+// ID-HU-INT-003: one failed attempt in the sync failure log.
+export interface SyncFailure {
+  id: string;
+  source_id: string;
+  source_name: string | null;
+  remote_id: string;
+  path: string;
+  attempt: number;
+  stage: "download" | "ingestion" | "permissions";
+  error: string;
+  occurred_at: string;
+  next_retry_at: string | null;
+  needs_review: boolean;
+  resolved_at: string | null;
+  resolution: string | null;
 }
 
 export interface SyncSourceRequest {
@@ -460,15 +496,33 @@ export interface SyncSourceRequest {
   source_tier?: SourceTier | null;
   auto_approve?: boolean;
   account_id?: string;
+  permission_rules?: PermissionRule[];
+}
+
+export interface SyncSourceUpdate {
+  name?: string;
+  confidentiality_tag?: string;
+  auto_approve?: boolean;
+  enabled?: boolean;
+  permission_rules?: PermissionRule[];
 }
 
 export interface SyncedFile {
+  id: string;
   remote_id: string;
   path: string;
   version_tag: string;
   remote_modified_at: string | null;
   document_id: string | null;
-  status: "ingested" | "failed";
+  // removed: deleted from the repository, no longer answers queries (ID-HU-INT-002);
+  // needs_review: retries exhausted (ID-HU-INT-003).
+  status: "ingested" | "failed" | "needs_review" | "removed";
   error: string | null;
   synced_at: string;
+  // Who the repository shares it with, and the resulting classification.
+  permissions: string[];
+  access_tag: string | null;
+  // ID-HU-INT-003: consecutive failed attempts and the next retry.
+  attempts: number;
+  next_retry_at: string | null;
 }

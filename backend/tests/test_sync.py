@@ -272,7 +272,9 @@ def test_main_new_sharepoint_file_is_ingested_and_queryable(db_session, repos):
 
     [summary] = repos.run(source).values()
 
-    assert summary == {"new": 1, "updated": 0, "unchanged": 0, "failed": 0, "skipped": 0}
+    assert summary == {"new": 1, "updated": 0, "unchanged": 0, "failed": 0, "skipped": 0,
+                       "permissions_changed": 0, "removed": 0, "restored": 0,
+                       "retry_pending": 0, "needs_review": 0}
     record = db_session.scalars(select(SyncedFile).where(SyncedFile.source_id == source.id)).one()
     document = db_session.get(Document, record.document_id)
     assert (record.status, record.version_tag, document.status) == ("ingested", "c1", "ready")
@@ -355,9 +357,15 @@ def test_a_failed_file_is_recorded_and_retried(db_session, repos):
 
     repo.fail_downloads.clear()
     [summary] = repos.run(source).values()
+    assert summary["retry_pending"] == 1  # ID-HU-INT-003: retried when its backoff is due
+
+    db_session.refresh(record)
+    record.next_retry_at = datetime.now(timezone.utc)
+    db_session.commit()
+    [summary] = repos.run(source).values()
     assert summary["new"] == 1
     db_session.refresh(record)
-    assert record.status == "ingested" and record.error is None
+    assert record.status == "ingested" and record.error is None and record.attempts == 0
 
 
 def test_other_file_types_are_skipped(db_session, repos):

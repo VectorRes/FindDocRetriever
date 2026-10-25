@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.dashboard.service import DashboardError, get_trend
-from app.db.models import Document
+from app.db.models import Document, DocumentStatus
 from app.db.session import SessionLocal, get_db
 from app.observability import trace
 from app.figures.extraction import ExtractionServiceError
@@ -75,6 +75,8 @@ def compute_ratios(
         document = db.get(Document, document_id)
         if document is None:
             raise HTTPException(status_code=404, detail=f"Document {document_id} not found")
+        if document.status == DocumentStatus.removed.value:  # ID-HU-INT-002
+            raise HTTPException(status_code=410, detail=f"{document.filename} was removed from its repository.")
         documents.append(document)
 
     try:

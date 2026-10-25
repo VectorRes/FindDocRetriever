@@ -19,9 +19,11 @@ import type {
   RepositoryAccount,
   SourceTier,
   SyncedFile,
+  SyncFailure,
   SyncOverview,
   SyncSource,
   SyncSourceRequest,
+  SyncSourceUpdate,
 } from "./types";
 
 const API_URL = import.meta.env.VITE_API_URL;
@@ -514,12 +516,27 @@ export function connectFolder(request: SyncSourceRequest): Promise<SyncSource> {
   return sendJson("POST", "/sync/sources", request);
 }
 
+// ID-HU-INT-002: e.g. the folder's access rules.
+export function updateFolder(sourceId: string, update: SyncSourceUpdate): Promise<SyncSource> {
+  return sendJson("PATCH", `/sync/sources/${sourceId}`, update);
+}
+
 export function disconnectFolder(sourceId: string): Promise<void> {
   return sendJson("DELETE", `/sync/sources/${sourceId}`);
 }
 
 export function runSync(sourceId?: string): Promise<{ started: boolean }> {
   return sendJson("POST", `/sync/run${sourceId ? `?source_id=${sourceId}` : ""}`);
+}
+
+// ID-HU-INT-003: the sync failure log, newest first.
+export function listSyncFailures(unresolved = false): Promise<SyncFailure[]> {
+  return sendJson("GET", `/sync/failures${unresolved ? "?unresolved=true" : ""}`);
+}
+
+// ID-HU-INT-003: try a failed (or flagged) file again now.
+export function retrySyncedFile(fileId: string): Promise<{ started: boolean }> {
+  return sendJson("POST", `/sync/files/${fileId}/retry`);
 }
 
 export function listSyncedFiles(sourceId: string): Promise<SyncedFile[]> {

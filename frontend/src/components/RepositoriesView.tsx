@@ -10,15 +10,20 @@ import {
   getSyncOverview,
   listRepositoryAccounts,
   listSyncedFiles,
+  listSyncFailures,
+  retrySyncedFile,
   runSync,
   startSignIn,
+  updateFolder,
 } from "../api/client";
 import type {
   FolderNode,
   OAuthProvider,
   OAuthProviderInfo,
+  PermissionRule,
   RepositoryAccount,
   SyncedFile,
+  SyncFailure,
   SyncOverview,
   SyncSource,
 } from "../api/types";
@@ -30,6 +35,16 @@ import type {
 const PROVIDER_LABELS: Record<OAuthProvider, string> = { google: "Google Drive", microsoft: "SharePoint / OneDrive" };
 const KIND_LABELS: Record<SyncSource["kind"], string> = { google_drive: "Google Drive", sharepoint: "SharePoint" };
 const CLASSIFICATIONS = ["internal", "public", "restricted"];
+// ID-HU-INT-002: what a repository group can stand for (app/retrieval/access.py).
+const RULE_TAGS = [
+  "public",
+  "internal",
+  "restricted",
+  "restricted:legal",
+  "restricted:compensation",
+  "restricted:related-parties",
+  "restricted:insider",
+];
 const POLL_MS = 3000;
 
 const timeFormat = new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short" });
@@ -59,6 +74,11 @@ function summaryText(source: SyncSource): string {
     s.unchanged ? `${s.unchanged} unchanged` : null,
     s.failed ? `${s.failed} failed` : null,
     s.skipped ? `${s.skipped} skipped (not Excel/PDF)` : null,
+    s.permissions_changed ? `${s.permissions_changed} access changed` : null,
+    s.removed ? `${s.removed} removed` : null,
+    s.restored ? `${s.restored} restored` : null,
+    s.retry_pending ? `${s.retry_pending} waiting to retry` : null,
+    s.needs_review ? `${s.needs_review} need manual review` : null,
   ].filter(Boolean);
   return parts.length ? parts.join(" · ") : "no files yet";
 }
@@ -74,6 +94,62 @@ interface ConnectForm {
   classification: string;
   autoApprove: boolean;
   includeSubfolders: boolean;
+  rules: PermissionRule[];
+}
+
+// ID-HU-INT-002: map the repository's groups to FinDoc classifications, so a
+// change of sharing there changes who can read the document here.
+function RulesEditor({ rules, onChange }: { rules: PermissionRule[]; onChange: (rules: PermissionRule[]) => void }) {
+  const set = (index: number, change: Partial<PermissionRule>) =>
+    onChange(rules.map((rule, i) => (i === index ? { ...rule, ...change } : rule)));
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
+      <span style={hint}>
+        Access follows the repository's sharing: map each group or user (name or email, or <code>anyone</code>,{" "}
+        <code>organization</code>) to a classification. A file gets the broadest one it's shared with; if no rule
+        matches, it's restricted. With no rules, every file gets the classification above.
+      </span>
+      {rules.map((rule, i) => (
+        <span key={i} style={{ display: "flex", gap: "0.4rem", alignItems: "center" }}>
+          <input
+            value={rule.principal}
+            onChange={(e) => set(i, { principal: e.target.value })}
+            placeholder="Group or user, e.g. Finance"
+            aria-label={`Rule ${i + 1} group or user`}
+            style={{ ...input, flex: 1 }}
+          />
+          →
+          <select
+            value={rule.tag}
+            onChange={(e) => set(i, { tag: e.target.value })}
+            aria-label={`Rule ${i + 1} classification`}
+            style={input}
+          >
+            {RULE_TAGS.map((tag) => (
+              <option key={tag} value={tag}>
+                {tag}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            onClick={() => onChange(rules.filter((_, j) => j !== i))}
+            style={dangerButton}
+            aria-label={`Remove rule ${i + 1}`}
+          >
+            ✕
+          </button>
+        </span>
+      ))}
+      <button
+        type="button"
+        onClick={() => onChange([...rules, { principal: "", tag: "internal" }])}
+        style={{ ...secondaryButton, alignSelf: "flex-start" }}
+      >
+        + Add rule
+      </button>
+    </div>
+  );
 }
 
 export default function RepositoriesView({ active = true }: { active?: boolean }) {
@@ -89,6 +165,11 @@ export default function RepositoriesView({ active = true }: { active?: boolean }
   const [browseError, setBrowseError] = useState<string | null>(null);
   const [form, setForm] = useState<ConnectForm | null>(null);
   const [files, setFiles] = useState<Record<string, SyncedFile[]>>({});
+  // Access rules being edited, by folder.
+  const [editing, setEditing] = useState<Record<string, PermissionRule[]>>({});
+  // ID-HU-INT-003: the failure log, when open.
+  const [failures, setFailures] = useState<SyncFailure[] | null>(null);
+  const [unresolvedOnly, setUnresolvedOnly] = useState(true);
   const [watching, setWatching] = useState(false);
 
   function reload() {
@@ -174,6 +255,7 @@ export default function RepositoriesView({ active = true }: { active?: boolean }
         confidentiality_tag: form.classification,
         auto_approve: form.autoApprove,
         account_id: account.id,
+        permission_rules: form.rules.filter((rule) => rule.principal.trim()),
       });
       setForm(null);
       await runSync(source.id);
@@ -202,6 +284,38 @@ export default function RepositoriesView({ active = true }: { active?: boolean }
       reload();
     } catch (err) {
       setNotice({ ok: false, message: errorText(err, "Could not disconnect the folder.") });
+    }
+  }
+
+  async function saveRules(sourceId: string) {
+    try {
+      await updateFolder(sourceId, {
+        permission_rules: (editing[sourceId] ?? []).filter((rule) => rule.principal.trim()),
+      });
+      setEditing(({ [sourceId]: _, ...rest }) => rest);
+      setNotice({ ok: true, message: "Access rules saved. They apply to every file on the next sync." });
+      reload();
+    } catch (err) {
+      setNotice({ ok: false, message: errorText(err, "Could not save the access rules.") });
+    }
+  }
+
+  async function loadFailures(unresolved: boolean) {
+    try {
+      setFailures(await listSyncFailures(unresolved));
+    } catch (err) {
+      setNotice({ ok: false, message: errorText(err, "Could not load the failure log.") });
+    }
+  }
+
+  async function retryFile(sourceId: string, file: SyncedFile) {
+    try {
+      await retrySyncedFile(file.id);
+      setNotice({ ok: true, message: `Retrying ${file.path} now.` });
+      setWatching(true);
+      setFiles(({ [sourceId]: _, ...rest }) => rest);
+    } catch (err) {
+      setNotice({ ok: false, message: errorText(err, "Could not retry the file.") });
     }
   }
 
@@ -242,6 +356,13 @@ export default function RepositoriesView({ active = true }: { active?: boolean }
         {notice && (
           <div role={notice.ok ? "status" : "alert"} style={{ ...banner(notice.ok), marginTop: "0.6rem" }}>
             {notice.message}
+          </div>
+        )}
+        {overview && overview.needs_review > 0 && (
+          <div role="alert" style={{ ...banner(false), marginTop: "0.6rem" }}>
+            {overview.needs_review} file{overview.needs_review > 1 ? "s" : ""} couldn't be synced after{" "}
+            {overview.retry_max_attempts} attempts and need{overview.needs_review > 1 ? "" : "s"} manual review: open
+            the folder's files or the failure log below.
           </div>
         )}
       </section>
@@ -339,6 +460,7 @@ export default function RepositoriesView({ active = true }: { active?: boolean }
                             classification: "internal",
                             autoApprove: false,
                             includeSubfolders: false,
+                            rules: [],
                           })
                         }
                         style={primaryButton}
@@ -389,6 +511,8 @@ export default function RepositoriesView({ active = true }: { active?: boolean }
                 />
                 The folder only holds approved documents (approve each synced version)
               </label>
+              <strong style={{ fontSize: "0.85rem" }}>Access rules</strong>
+              <RulesEditor rules={form.rules} onChange={(rules) => setForm({ ...form, rules })} />
               <span style={{ display: "flex", gap: "0.4rem" }}>
                 <button type="submit" style={primaryButton}>
                   Connect and sync
@@ -401,6 +525,72 @@ export default function RepositoriesView({ active = true }: { active?: boolean }
           )}
         </section>
       )}
+
+      <section aria-label="Sync failure log" style={panel}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "0.5rem" }}>
+          <h3 style={heading}>Sync failure log</h3>
+          <span style={{ display: "flex", gap: "0.4rem", alignItems: "center" }}>
+            {failures && (
+              <label style={checkbox}>
+                <input
+                  type="checkbox"
+                  checked={unresolvedOnly}
+                  onChange={(e) => {
+                    setUnresolvedOnly(e.target.checked);
+                    loadFailures(e.target.checked);
+                  }}
+                />
+                Unresolved only
+              </label>
+            )}
+            <button
+              type="button"
+              onClick={() => (failures ? setFailures(null) : loadFailures(unresolvedOnly))}
+              style={secondaryButton}
+            >
+              {failures ? "Hide log" : `Show log (${overview?.open_failures ?? 0} open)`}
+            </button>
+          </span>
+        </div>
+        <p style={hint}>
+          A file that fails never stops the others. It's retried with growing waits (15 min, 30, 60…), and after{" "}
+          {overview?.retry_max_attempts ?? 5} attempts it's flagged for manual review.
+        </p>
+        {failures && (
+          <table style={table} aria-label="Failures">
+            <tbody>
+              {failures.length === 0 && (
+                <tr>
+                  <td style={cell}>No failures.</td>
+                </tr>
+              )}
+              {failures.map((f) => (
+                <tr key={f.id}>
+                  <td style={{ ...cell, color: "#64748b", whiteSpace: "nowrap" }}>
+                    {timeFormat.format(new Date(f.occurred_at))}
+                  </td>
+                  <td style={cell}>
+                    {f.source_name} / {f.path}
+                  </td>
+                  <td style={cell}>
+                    {f.stage}, attempt {f.attempt}
+                  </td>
+                  <td style={cell}>{f.error}</td>
+                  <td style={{ ...cell, color: f.resolved_at ? "#15803d" : "#b91c1c", whiteSpace: "nowrap" }}>
+                    {f.resolved_at
+                      ? `resolved: ${f.resolution}`
+                      : f.needs_review
+                        ? "⚠ needs manual review"
+                        : f.next_retry_at
+                          ? `retry ${timeFormat.format(new Date(f.next_retry_at))}`
+                          : "open"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
 
       <section aria-label="Connected folders" style={panel}>
         <h3 style={heading}>Connected folders</h3>
@@ -427,6 +617,19 @@ export default function RepositoriesView({ active = true }: { active?: boolean }
                     <button type="button" onClick={() => toggleFiles(source.id)} style={secondaryButton}>
                       {files[source.id] ? "Hide files" : `Files (${source.file_count})`}
                     </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setEditing((current) =>
+                          source.id in current
+                            ? (({ [source.id]: _, ...rest }) => rest)(current)
+                            : { ...current, [source.id]: source.permission_rules ?? [] },
+                        )
+                      }
+                      style={secondaryButton}
+                    >
+                      Access rules ({source.permission_rules?.length ?? 0})
+                    </button>
                     <button type="button" onClick={() => removeFolder(source)} style={dangerButton}>
                       Disconnect
                     </button>
@@ -440,6 +643,17 @@ export default function RepositoriesView({ active = true }: { active?: boolean }
                 {source.last_status === "error" && source.last_error && (
                   <div role="alert" style={banner(false)}>{source.last_error}</div>
                 )}
+                {source.id in editing && (
+                  <div aria-label={`Access rules of ${source.name}`} style={formBox}>
+                    <RulesEditor
+                      rules={editing[source.id]}
+                      onChange={(rules) => setEditing((current) => ({ ...current, [source.id]: rules }))}
+                    />
+                    <button type="button" onClick={() => saveRules(source.id)} style={{ ...primaryButton, alignSelf: "flex-start" }}>
+                      Save access rules
+                    </button>
+                  </div>
+                )}
                 {files[source.id] && (
                   <table style={table} aria-label={`Files of ${source.name}`}>
                     <tbody>
@@ -451,8 +665,31 @@ export default function RepositoriesView({ active = true }: { active?: boolean }
                       {files[source.id].map((f) => (
                         <tr key={f.remote_id}>
                           <td style={cell}>{f.path}</td>
-                          <td style={{ ...cell, color: f.status === "failed" ? "#b91c1c" : "#15803d" }}>
-                            {f.status === "failed" ? `failed: ${f.error}` : "ingested"}
+                          <td style={{ ...cell, color: f.status === "ingested" ? "#15803d" : "#b91c1c" }}>
+                            {f.status === "failed" && (
+                              <>
+                                failed (attempt {f.attempts}/{overview.retry_max_attempts}): {f.error}
+                                {f.next_retry_at ? ` — retry ${timeFormat.format(new Date(f.next_retry_at))}` : ""}
+                              </>
+                            )}
+                            {f.status === "needs_review" && (
+                              <>needs manual review after {f.attempts} attempts: {f.error}</>
+                            )}
+                            {f.status === "removed" && "removed from the repository"}
+                            {f.status === "ingested" && "ingested"}
+                            {(f.status === "failed" || f.status === "needs_review") && (
+                              <button
+                                type="button"
+                                onClick={() => retryFile(source.id, f)}
+                                style={{ ...secondaryButton, marginLeft: "0.4rem" }}
+                                aria-label={`Retry ${f.path}`}
+                              >
+                                Retry
+                              </button>
+                            )}
+                          </td>
+                          <td style={cell} title={f.permissions.length ? `Shared with: ${f.permissions.join(", ")}` : undefined}>
+                            {f.access_tag ?? ""}
                           </td>
                           <td style={{ ...cell, color: "#64748b" }}>{timeFormat.format(new Date(f.synced_at))}</td>
                         </tr>

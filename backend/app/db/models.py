@@ -19,6 +19,9 @@ class DocumentStatus(str, enum.Enum):
     processing = "processing"
     ready = "ready"
     failed = "failed"
+    # ID-HU-INT-002: deleted from the repository it was synced from; kept for
+    # audit but never searched again (not even by explicit document id).
+    removed = "removed"
 
 
 def _uuid() -> uuid.UUID:
@@ -394,8 +397,16 @@ class SyncSource(Base):
     # "ok" | "error" | None (never synced), and why it failed.
     last_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Counts of the last run: {"new", "updated", "unchanged", "failed", "skipped"}.
+    # Counts of the last run: {"new", "updated", "unchanged", "failed", "skipped",
+    # "permissions_changed", "removed", "restored"}.
     last_summary: Mapped[dict] = mapped_column(JSON, default=dict)
+    # ID-HU-INT-002: how the repository's sharing maps to FinDoc's access
+    # model, e.g. [{"principal": "Finance", "tag": "internal"},
+    # {"principal": "Legal Corporate", "tag": "restricted:legal"}]. A principal
+    # is a group or user (name or email) or "anyone" / "organization" /
+    # "domain:<domain>". Empty: permissions aren't propagated and every
+    # document gets `confidentiality_tag` (app/sync/permissions.py).
+    permission_rules: Mapped[list] = mapped_column(JSON, default=list)
 
     # Set when the folder was connected through a signed-in account (OAuth):
     # synced with that account's access instead of service credentials.
@@ -425,9 +436,46 @@ class SyncedFile(Base):
     document_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("documents.id", ondelete="SET NULL"), nullable=True
     )
-    # "ingested" | "failed" (retried on the next sync).
+    # "ingested" | "failed" (retried per the retry policy) | "needs_review"
+    # (retries exhausted, ID-HU-INT-003) | "removed" (deleted from the
+    # repository; restored if it comes back).
     status: Mapped[str] = mapped_column(String(16))
+    # ID-HU-INT-002: who the repository shares the file with, as last read,
+    # and the classification that gave.
+    permissions: Mapped[list] = mapped_column(JSON, default=list)
+    access_tag: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # ID-HU-INT-003: consecutive failed attempts, and when the next one is due
+    # (app/sync/retry.py). Reset when the file syncs or someone retries it.
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     source: Mapped["SyncSource"] = relationship(back_populates="files")
+
+
+class SyncFailure(Base):
+    """One failed attempt to sync a file (ID-HU-INT-003): the failure log
+    administrators see in the Repositories tab. Entries of a file are marked
+    resolved when a later attempt succeeds; the last one of a file whose
+    retries ran out is the "needs manual review" alert."""
+
+    __tablename__ = "sync_failures"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    source_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("sync_sources.id", ondelete="CASCADE"), index=True)
+    remote_id: Mapped[str] = mapped_column(String(255))
+    path: Mapped[str] = mapped_column(Text)
+    # Which attempt failed (1 = the first), out of SYNC_RETRY_MAX_ATTEMPTS.
+    attempt: Mapped[int] = mapped_column(Integer)
+    # "download" | "ingestion" | "permissions": the step that failed.
+    stage: Mapped[str] = mapped_column(String(32))
+    error: Mapped[str] = mapped_column(Text)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+    # Set while another attempt is planned; None once retries are exhausted.
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Retries exhausted: flagged for manual review (an administrator alert).
+    needs_review: Mapped[bool] = mapped_column(Boolean, default=False)
+    # When a later attempt synced the file (or it left the folder), and how.
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolution: Mapped[str | None] = mapped_column(String(64), nullable=True)

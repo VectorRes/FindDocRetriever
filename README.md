@@ -514,7 +514,54 @@ Endpoints:
   - **Marca igual:** no se descarga.
 - Solo se sincronizan `.xlsx`, `.xlsm` y `.pdf`. Las hojas de Google Sheets se exportan como `.xlsx`.
 - Un archivo que falla queda registrado con el motivo y se reintenta en la siguiente sincronización.
-- Borrar un archivo del repositorio no lo borra de FinDoc.
+- Borrar un archivo del repositorio lo **retira** de FinDoc (ver ID-HU-INT-002 abajo).
+
+### Permisos y archivos borrados en el repositorio (ID-HU-INT-002)
+
+Los cambios de acceso en SharePoint o Google Drive se reflejan en FinDoc en la siguiente sincronización (`app/sync/permissions.py`, `app/sync/service.py`).
+
+**Reglas de acceso de cada carpeta:** FinDoc da acceso por clasificación y rol, no por usuarios y grupos. Por eso cada carpeta tiene reglas que traducen los grupos del repositorio a clasificaciones de FinDoc. Se editan en la pestaña Repositories → **Access rules**, al conectar la carpeta o después.
+
+```json
+[{"principal": "Finance", "tag": "internal"},
+ {"principal": "Legal Corporate", "tag": "restricted:legal"},
+ {"principal": "Controllers", "tag": "restricted"},
+ {"principal": "anyone", "tag": "public"}]
+```
+
+- **`principal`:** un grupo o usuario, por nombre o correo, sin distinguir mayúsculas. Puede ser un grupo de SharePoint como "Finance Members", un grupo de Microsoft 365 o de Google, o un usuario. También acepta `anyone` (enlace anónimo), `organization` (enlace de toda la organización) y `domain:<dominio>` (dominio de Google Drive).
+- **Lectura de permisos:** en cada sincronización se leen los permisos de cada archivo, incluidos los heredados (Graph `/permissions`, Drive `permissions.list`), y se calcula su clasificación:
+  - gana la **menos restrictiva** de las reglas que coinciden: un archivo compartido con Finance y con Legal lo lee Finance, así que queda `internal`;
+  - si coinciden dos categorías restringidas distintas (legal y compensación), queda `restricted`, para no abrirlo de más;
+  - si ninguna regla coincide (por ejemplo, solo lo ve su dueño), queda `restricted`.
+- **Cambio de permisos:** si la clasificación cambia, se actualizan el documento, **todas sus versiones** y sus fragmentos (`permissions_changed`), tanto al restringir (el analista **pierde** el acceso, sin aviso especial: el documento simplemente deja de aparecer) como al ampliar (lo gana).
+- **Sin reglas,** se usa la clasificación fija de la carpeta, y la clasificación que haya puesto un revisor en FinDoc no se toca.
+- **Permisos ilegibles:** si no se pueden leer los permisos de un archivo (p. ej. 403), queda como estaba y se reintenta.
+
+**Archivos borrados:**
+- Un archivo que ya no está en la carpeta queda `removed`: todas las versiones de su documento dejan de responder consultas, incluso pidiéndolas explícitamente por `document_id`. Comparar y calcular ratios con él responde **410**.
+- Se conservan para auditoría.
+- Si el archivo vuelve sin cambios (por ejemplo, desde la papelera), se **restaura** (`restored`). Si vuelve editado, se ingiere como nueva versión.
+
+### Fallos de sincronización y reintentos (ID-HU-INT-003)
+
+Un archivo que falla o viene corrupto nunca bloquea al resto (`app/sync/retry.py`).
+
+- **Aislamiento:** cada archivo se sincroniza por separado. Si uno falla al descargarlo, al ingerirlo (archivo corrupto) o al leer sus permisos, el resto se ingiere igual. Si 1 de 20 viene corrupto, los otros 19 quedan disponibles.
+- **Archivo corrupto:** la versión que no se pudo ingerir se descarta, así los reintentos no llenan la lista de documentos con copias fallidas.
+- **Reintentos:** se reintenta con espera exponencial: `SYNC_RETRY_BACKOFF_MINUTES` (15), luego 30, 60, 120… hasta `SYNC_RETRY_MAX_BACKOFF_MINUTES` (24 h). El reintento ocurre en la primera sincronización después de esa hora; antes no se toca (`retry_pending`).
+- **Reintentos agotados:** tras `SYNC_RETRY_MAX_ATTEMPTS` intentos (5), el archivo queda `needs_review`:
+  - deja de reintentarse solo;
+  - el fallo queda marcado en el registro como **alerta** (y como error en el log del servidor);
+  - la pestaña Repositories lo avisa arriba.
+  
+  Se vuelve a intentar con el botón **Retry** de la pestaña (`POST /sync/files/{id}/retry`, que reinicia los intentos), o solo si el archivo cambia en el repositorio, porque alguien pudo haberlo arreglado.
+- **Registro de fallos:** cada intento fallido queda registrado con su paso (`download`, `ingestion`, `permissions`), la causa, el número de intento y el próximo reintento. Cuando un reintento funciona, sus fallos quedan **resueltos** ("retry succeeded"). Si el archivo sale de la carpeta, también ("left the folder").
+- **Dónde se ve:** en Repositories → **Sync failure log**, y en `GET /sync/failures[?source_id=…&unresolved=true]` (rol aprobador o admin; si no, 403). `GET /sync/sources` da `needs_review` y `open_failures`; `GET /sync/sources/{id}/files`, `attempts` y `next_retry_at` de cada archivo.
+
+**Endpoints:**
+- `PATCH /sync/sources/{id}` con `{"permission_rules": [...]}`: cambia las reglas, que se aplican en la siguiente sincronización.
+- `GET /sync/sources/{id}/files`: muestra, por archivo, con quién está compartido (`permissions`) y su clasificación (`access_tag`).
 
 **Endpoints** (todos requieren un rol aprobador; si no, 403):
 - `GET /sync/sources`: las carpetas con su última sincronización (`last_status`, `last_error`, `last_summary` con nuevos, actualizados, sin cambios, fallidos y omitidos), el intervalo y si hay una sincronización en curso.
@@ -701,6 +748,15 @@ docker compose exec api pytest
   - **Sincronización con un repositorio falso e ingesta real:** archivo nuevo de SharePoint y de Drive consultable enseguida, archivo editado que pasa a ser nueva versión (la copia vieja deja de responder), archivos sin cambios que no se descargan, ambos repositorios en una sola corrida, fallo y reintento, archivos omitidos, repositorio inaccesible, aprobación automática y candado.
   - **El programador** de sincronizaciones y la API.
 - `test_oauth.py` cubre el inicio de sesión con Google y Microsoft contra proveedores simulados: el `state` firmado (falsificado, vencido o de otro proveedor), las URLs de inicio de sesión, el guardado de la cuenta con tokens cifrados, la renovación del token y la rotación del refresh token, el navegador de carpetas, la sincronización con el token de la cuenta y la API (callback, conectar y desconectar). `RepositoriesView.test.tsx` cubre la pestaña.
+- `test_sync_retry.py` cubre ID-HU-INT-003:
+  - 1 archivo corrupto entre 20: los otros 19 se ingieren y se pueden consultar; el corrupto queda registrado con reintento programado y sin documento fallido.
+  - El archivo espera su reintento; un fallo temporal funciona al reintentar y el registro queda resuelto.
+  - Tras 5 intentos queda en revisión manual con alerta y ya no se reintenta solo; se vuelve a intentar si cambia en el repositorio o si sale de la carpeta.
+  - El tiempo de espera exponencial, y la API del registro y de Retry.
+- `test_permission_sync.py` cubre ID-HU-INT-002:
+  - De permisos a clasificación: la menos restrictiva gana, categorías distintas o sin coincidencia quedan `restricted`.
+  - Lectura de permisos de Graph y Drive simulados.
+  - Con ingesta y búsqueda reales: restringir en SharePoint (el analista pierde el acceso, también a versiones anteriores y pidiéndolo explícitamente; el controller lo conserva), ampliar a Finance (el analista lo gana), archivo borrado (deja de responder, 410 en ratios) y restaurado, permisos ilegibles, sin reglas y la API de reglas.
 - `test_ratios.py` cubre ID-HU-BE-010.
   - **Sin base ni LLM** (extractor falso): cada fórmula contra estados de
     ejemplo, el mapeo de etiquetas, los ratios entre documentos, los ratios

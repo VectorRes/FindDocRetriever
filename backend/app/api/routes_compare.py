@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
-from app.db.models import Document
+from app.db.models import Document, DocumentStatus
 from app.db.session import get_db
 from app.figures.comparison import compare_documents
 from app.figures.extraction import ExtractionServiceError
@@ -43,6 +43,8 @@ def compare(
         document = db.get(Document, document_id)
         if document is None:
             raise HTTPException(status_code=404, detail=f"Document {document_id} not found")
+        if document.status == DocumentStatus.removed.value:  # ID-HU-INT-002
+            raise HTTPException(status_code=410, detail=f"{document.filename} was removed from its repository.")
         documents.append(document)
 
     try:

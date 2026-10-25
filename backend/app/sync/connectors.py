@@ -24,6 +24,7 @@ from urllib.parse import quote, urlparse
 import httpx
 
 from app.config import get_settings
+from app.sync.permissions import ANYONE, ORGANIZATION, Principal, principal
 
 GRAPH = "https://graph.microsoft.com/v1.0"
 DRIVE = "https://www.googleapis.com/drive/v3"
@@ -166,6 +167,32 @@ class SharePointConnector:
         return self._get(f"{GRAPH}/drives/{self.drive_id()}/items/{remote.remote_id}/content",
                          f"Downloading {remote.path} from SharePoint").content
 
+    def permissions(self, remote: RemoteFile) -> list[Principal]:
+        """Who the file is shared with (ID-HU-INT-002), inherited permissions
+        included: users, Microsoft 365 / security groups, SharePoint site
+        groups ("Finance Members"), and sharing links ("anyone" for
+        anonymous links, "organization" for organization-wide ones)."""
+        url = f"{GRAPH}/drives/{self.drive_id()}/items/{remote.remote_id}/permissions"
+        principals: list[Principal] = []
+        while url:
+            body = self._get(url, f"Reading the permissions of {remote.path}").json()
+            for entry in body.get("value", []):
+                identities = [entry.get("grantedToV2"), entry.get("grantedTo"),
+                              *entry.get("grantedToIdentitiesV2", []), *entry.get("grantedToIdentities", [])]
+                for identity in filter(None, identities):
+                    for key in ("user", "group", "siteGroup", "siteUser"):
+                        who = identity.get(key)
+                        if who:
+                            principals.append(principal(who.get("email"), who.get("displayName"),
+                                                        who.get("loginName")))
+                scope = (entry.get("link") or {}).get("scope")
+                if scope == "anonymous":
+                    principals.append(principal(ANYONE))
+                elif scope == "organization":
+                    principals.append(principal(ORGANIZATION))
+            url = body.get("@odata.nextLink")
+        return principals
+
 
 # --- Google Drive -------------------------------------------------------------------------------
 
@@ -255,6 +282,32 @@ class GoogleDriveConnector:
                              mimeType=remote.export_mime_type).content
         return self._get(f"{DRIVE}/files/{remote.remote_id}", f"Downloading {remote.path} from Google Drive",
                          alt="media", supportsAllDrives="true").content
+
+    def permissions(self, remote: RemoteFile) -> list[Principal]:
+        """Who the file is shared with (ID-HU-INT-002): users and Google
+        groups (email and name), a whole domain ("domain:<domain>") and
+        anyone with the link ("anyone")."""
+        params = {
+            "fields": "nextPageToken, permissions(type, emailAddress, domain, displayName, deleted)",
+            "supportsAllDrives": "true", "pageSize": "100",
+        }
+        principals: list[Principal] = []
+        while True:
+            body = self._get(f"{DRIVE}/files/{remote.remote_id}/permissions",
+                             f"Reading the permissions of {remote.path}", **params).json()
+            for entry in body.get("permissions", []):
+                if entry.get("deleted"):
+                    continue
+                kind = entry.get("type")
+                if kind == "anyone":
+                    principals.append(principal(ANYONE))
+                elif kind == "domain":
+                    principals.append(principal(f"domain:{entry.get('domain', '')}"))
+                else:
+                    principals.append(principal(entry.get("emailAddress"), entry.get("displayName")))
+            if not body.get("nextPageToken"):
+                return principals
+            params["pageToken"] = body["nextPageToken"]
 
 
 # --- from a source's settings -------------------------------------------------------------------

@@ -552,6 +552,19 @@ class SyncSourceIn(BaseModel):
     enabled: bool = True
     # A signed-in account (Repositories tab) to sync with, instead of service credentials.
     account_id: UUID | None = None
+    # ID-HU-INT-002: [{"principal": "Finance", "tag": "internal"}, ...]; the
+    # repository's sharing decides each document's classification.
+    permission_rules: list[dict] = Field(default_factory=list)
+
+
+class SyncSourceUpdate(BaseModel):
+    """Fields to change on a connected folder; omitted ones are kept."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    confidentiality_tag: str | None = None
+    auto_approve: bool | None = None
+    enabled: bool | None = None
+    permission_rules: list[dict] | None = None
 
 
 class SyncSourceOut(BaseModel):
@@ -574,6 +587,7 @@ class SyncSourceOut(BaseModel):
     file_count: int = 0
     account_id: UUID | None = None
     account_email: str | None = None
+    permission_rules: list[dict] = []
 
 
 class SyncOverviewOut(BaseModel):
@@ -581,23 +595,54 @@ class SyncOverviewOut(BaseModel):
     running: bool
     next_run_at: datetime | None = None
     sources: list[SyncSourceOut]
+    # ID-HU-INT-003: files flagged for manual review, and unresolved failures.
+    needs_review: int = 0
+    open_failures: int = 0
+    retry_max_attempts: int = 5
 
 
 class SyncedFileOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
+    id: UUID
     remote_id: str
     path: str
     version_tag: str
     remote_modified_at: datetime | None = None
     document_id: UUID | None = None
-    status: str  # "ingested" | "failed"
+    status: str  # "ingested" | "failed" | "needs_review" | "removed"
     error: str | None = None
     synced_at: datetime
+    # ID-HU-INT-003: consecutive failed attempts and when the next one is due.
+    attempts: int = 0
+    next_retry_at: datetime | None = None
+    # ID-HU-INT-002: who the repository shares it with, and the resulting classification.
+    permissions: list[str] = []
+    access_tag: str | None = None
 
 
 class SyncRunOut(BaseModel):
     started: bool
+
+
+class SyncFailureOut(BaseModel):
+    """ID-HU-INT-003: one failed attempt in the sync failure log."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    source_id: UUID
+    source_name: str | None = None
+    remote_id: str
+    path: str
+    attempt: int
+    stage: str  # "download" | "ingestion" | "permissions"
+    error: str
+    occurred_at: datetime
+    next_retry_at: datetime | None = None
+    needs_review: bool
+    resolved_at: datetime | None = None
+    resolution: str | None = None
 
 
 class OAuthProviderOut(BaseModel):

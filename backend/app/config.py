@@ -76,6 +76,12 @@ class Settings(BaseSettings):
     # connected folder for new and updated files; 0 turns the scheduler off
     # (POST /sync/run still syncs on demand).
     sync_interval_minutes: int = 15
+    # ID-HU-INT-003: a file that fails to sync is retried with exponential
+    # backoff (base, 2x, 4x… capped) up to this many attempts in all, then
+    # flagged for manual review instead of retrying forever.
+    sync_retry_max_attempts: int = 5
+    sync_retry_backoff_minutes: float = 15
+    sync_retry_max_backoff_minutes: float = 1440
     # SharePoint, through Microsoft Graph with an Entra ID (Azure AD) app
     # registration: client-credentials flow, application permission
     # Sites.Read.All (or Sites.Selected).
