@@ -6,6 +6,7 @@ from app.config import get_settings
 from app.db.models import Cell, Document, DocumentStatus, NamedRange, PdfReference, PdfTable, Sheet
 from app.embeddings.factory import get_embedding_provider
 from app.ingestion.chunker import chunk_pdf, chunk_workbook
+from app.ingestion.context import embedding_text
 from app.ingestion.excel_parser import ExcelParsingError, parse_excel
 from app.ingestion.pdf_parser import PdfParsingError, parse_pdf
 from app.retrieval.vector_store import add_chunks
@@ -73,7 +74,8 @@ def ingest_excel_file(
     chunks = chunk_workbook(parsed)
     if chunks:
         provider = get_embedding_provider()
-        embeddings = provider.embed([c.text for c in chunks])
+        # With the document's name, so a question naming the company finds its rows.
+        embeddings = provider.embed([embedding_text(document.filename, c.text) for c in chunks])
         add_chunks(
             db,
             document_id=document.id,
@@ -153,7 +155,7 @@ def ingest_pdf_file(
                 c.text, c.sheet_name, c.cell_range, c.page_number, c.content_type, table_id, reference_id,
                 c.extraction_method, c.confidence, c.confidence_label,
             ))
-        embeddings = provider.embed([row[0] for row in chunk_rows])
+        embeddings = provider.embed([embedding_text(document.filename, row[0]) for row in chunk_rows])
         add_chunks(db, document_id=document.id, chunks=chunk_rows, embeddings=embeddings)
 
     document.status = DocumentStatus.ready.value

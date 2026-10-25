@@ -52,6 +52,7 @@ def retrieve(
     user_id: str | None = "anonymous",
     document_id: UUID | None = None,
     min_score: float | None = None,
+    document_ids: list[UUID] | None = None,
 ) -> list[RetrievedChunk]:
     """Nearest accessible chunks to `question`, ranked by relevance, from each
     document's default version — or only from `document_id` when given
@@ -59,7 +60,10 @@ def retrieve(
 
     ID-HU-BE-007: only chunks the user's roles may see are considered, and
     only those at least `min_score` similar to the question (default
-    RETRIEVAL_MIN_SCORE). When nothing is relevant the list is empty."""
+    RETRIEVAL_MIN_SCORE). When nothing is relevant the list is empty.
+
+    `document_ids` limits the search to those documents (their default
+    versions), e.g. the company a question names."""
     settings = get_settings()
     provider = get_embedding_provider()
     [query_embedding] = provider.embed([question])
@@ -69,7 +73,7 @@ def retrieve(
     matches = similarity_search(
         db, query_embedding, limit,
         accessible_tags=allowed_tags, document_id=document_id,
-        min_score=_min_score(min_score),
+        min_score=_min_score(min_score), document_ids=document_ids,
     )
     chunks = [chunk for chunk, _ in matches]
 

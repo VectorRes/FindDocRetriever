@@ -84,12 +84,13 @@ def test_question_and_translation_are_both_searched(monkeypatch):
     get_settings.cache_clear()
     searched = []
 
-    def fake_retrieve(db, question, top_k, user_roles, user_id, document_id):
+    def fake_retrieve(db, question, top_k, user_roles, user_id, document_id, document_ids=None):
         searched.append((question, top_k))
         return [_chunk("EN" if question.startswith("What") else "ES", 1)]
 
     monkeypatch.setattr(expansion, "retrieve", fake_retrieve)
     monkeypatch.setattr(expansion, "translate", lambda q: "What was cash?")
+    monkeypatch.setattr(expansion, "named_documents", lambda db, q: [])  # no company named
     try:
         chunks = expansion.retrieve_for_question(None, "¿Cuál era el efectivo?", top_k=4)
     finally:
@@ -106,7 +107,52 @@ def test_translation_can_be_turned_off(monkeypatch, scoped):
     searched = []
     monkeypatch.setattr(expansion, "retrieve", lambda db, question, **kw: searched.append(question) or [])
     monkeypatch.setattr(expansion, "translate", lambda q: pytest.fail("translation is off in tests"))
+    monkeypatch.setattr(expansion, "named_documents", lambda db, q: [])
 
     expansion.retrieve_for_question(None, "What was revenue?", document_id="d" if scoped else None)
 
     assert searched == ["What was revenue?"]
+
+
+def test_the_named_companys_documents_fill_the_sources_first(monkeypatch):
+    """"Total revenues of Micron": Micron's rows come first even when another
+    company's rows match the words better; others only take what's left."""
+    calls = []
+
+    def fake_retrieve(db, question, top_k, user_roles, user_id, document_id, document_ids=None):
+        calls.append(document_ids)
+        if document_ids:
+            return [_chunk("micron", i) for i in range(3)]
+        return [_chunk("tesla", i) for i in range(10)] + [_chunk("micron", 0)]
+
+    monkeypatch.setattr(expansion, "retrieve", fake_retrieve)
+    monkeypatch.setattr(expansion, "named_documents", lambda db, q: ["micron-doc"])
+
+    chunks = expansion.retrieve_for_question(None, "What were the total revenues of Micron?", top_k=8)
+
+    assert calls == [["micron-doc"], None]
+    assert [c.document_id for c in chunks[:3]] == ["micron"] * 3
+    assert len(chunks) == 8 and len({c.chunk_id for c in chunks}) == 8  # no repeats
+
+
+def test_named_documents_by_their_file_names(db_session):
+    from app.db.models import Document
+
+    import random, string
+
+    tag = "".join(random.choices(string.ascii_lowercase, k=8))  # file-name entities are letters only
+    docs = [
+        Document(filename=f"Zorvex{tag}-Technology-Inc.-Q3-2026-Report.pdf", doc_type="pdf", status="ready",
+                 warnings=[], is_current=True),
+        Document(filename=f"EERR_Quillan{tag}_2024.xlsx", status="ready", warnings=[], is_current=True),
+    ]
+    db_session.add_all(docs)
+    db_session.commit()
+    try:
+        assert expansion.named_documents(db_session, f"What were the total revenues of zorvex{tag}?") == [docs[0].id]
+        assert expansion.named_documents(db_session, f"¿Cuál fue la utilidad de Quillan{tag} en 2024?") == [docs[1].id]
+        assert expansion.named_documents(db_session, "What was revenue?") == []
+    finally:
+        for doc in docs:
+            db_session.delete(doc)
+        db_session.commit()

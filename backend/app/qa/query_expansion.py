@@ -11,6 +11,12 @@ things the QA answers need:
   and crowd out the others ("What was revenue?" returning only one company).
   When no document is selected, no document takes more than
   MAX_SHARE_PER_DOCUMENT of the sources while others have relevant ones.
+- The company asked about: when the question names a company one or more
+  documents are about ("total revenues of Micron", by the documents' file
+  names), those documents are searched first and fill the sources; other
+  documents only take the slots left. Otherwise another company's rows that
+  match the question's words better ("Tesla … Total revenues") would crowd
+  out the right company's figures.
 
 Both only change which chunks are passed on; access control and auditing
 stay with retrieve().
@@ -18,11 +24,14 @@ stay with retrieve().
 import logging
 import math
 import re
+import unicodedata
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.db.models import Document, DocumentStatus
 from app.qa.llm import get_chat_model
 from app.retrieval.service import RetrievedChunk, retrieve
 
@@ -111,6 +120,29 @@ def diversify(ranked: list[RetrievedChunk], top_k: int) -> list[RetrievedChunk]:
     return chosen
 
 
+def _words(text: str) -> set[str]:
+    folded = unicodedata.normalize("NFKD", text.lower()).encode("ascii", "ignore").decode()
+    return set(re.findall(r"[a-z0-9]+", folded))
+
+
+def named_documents(db: Session, question: str) -> list[UUID]:
+    """The current documents of the company the question names, by the name
+    their file gives ("EERR_Andina_2024.xlsx" -> Andina,
+    "Micron-Technology-Inc.-MU-Q3-2026-Report.pdf" -> Micron)."""
+    from app.qa.graph import entity_from_filename
+
+    words = _words(question)
+    named = []
+    for document_id, filename in db.execute(
+        select(Document.id, Document.filename).where(
+            Document.is_current.is_(True), Document.status == DocumentStatus.ready.value)
+    ).all():
+        entity = entity_from_filename(filename)
+        if entity and _words(entity) <= words:
+            named.append(document_id)
+    return named
+
+
 def retrieve_for_question(
     db: Session,
     question: str,
@@ -133,16 +165,23 @@ def retrieve_with_translation(
     """The chunks for `question`, and the question in the other language
     (None when translation is off or failed)."""
     settings = get_settings()
-    translated = None
     k = top_k or settings.retrieval_top_k
+    translated = translate(question) if settings.query_translation else None
+    questions = [question, *([translated] if translated else [])]
+
+    def search(document_ids=None, pool=k):
+        return interleave(*(
+            retrieve(db, question=q, top_k=pool, user_roles=user_roles, user_id=user_id,
+                     document_id=document_id, document_ids=document_ids)
+            for q in questions
+        ))
+
+    if document_id:
+        return search()[:k], translated
+    # The documents of the company the question names come first.
+    named = named_documents(db, question)
+    first = search(named)[:k] if named else []
     # Fetch more than k so diversifying has other documents' chunks to choose from.
-    pool = k if document_id else k * 2
-    rankings = [retrieve(db, question=question, top_k=pool, user_roles=user_roles, user_id=user_id,
-                         document_id=document_id)]
-    if settings.query_translation:
-        translated = translate(question)
-        if translated:
-            rankings.append(retrieve(db, question=translated, top_k=pool, user_roles=user_roles,
-                                     user_id=user_id, document_id=document_id))
-    merged = interleave(*rankings)
-    return (merged[:k] if document_id else diversify(merged, k)), translated
+    taken = {c.chunk_id for c in first}
+    others = [c for c in search(pool=k * 2) if c.chunk_id not in taken]
+    return first + diversify(others, k - len(first)), translated

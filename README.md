@@ -246,6 +246,21 @@ documentos, en la versión por defecto de cada uno:
   y del flujo de caja.
 - La extracción de cifras de ratios/comparación (`extract_figure`) no usa el
   umbral: el documento ya está elegido y el modelo decide si la cifra está.
+- **El documento en cada fragmento** (`app/ingestion/context.py`): cada
+  fragmento se convierte a vector con el nombre de su documento delante
+  (*"Document: Micron Technology Inc. MU Q3 2026 Report"*), porque una fila de
+  un PDF a menudo no dice de qué empresa es (*"row 'Revenue': column 1=9,301"*).
+  Solo cambia el vector: el texto guardado, que es el que muestran las citas y
+  contra el que se verifican las cifras, queda igual. Los documentos subidos
+  antes de este cambio se actualizan con
+  `docker compose exec api python -m app.ingestion.reembed`.
+- **Primero la empresa que nombra la pregunta**
+  (`app/qa/query_expansion.py`): si la pregunta nombra una empresa que es el
+  nombre de uno o más documentos, según su archivo (*"total revenues of
+  Micron"* → `Micron-Technology-Inc.-…pdf`), se buscan primero en esos
+  documentos y sus fragmentos llenan las fuentes. Los demás solo ocupan los
+  lugares que sobran. Así, las filas *"Total revenues"* de Tesla ya no
+  desplazan las de Micron.
 
 ### Lectura de tablas PDF y búsqueda del chat
 

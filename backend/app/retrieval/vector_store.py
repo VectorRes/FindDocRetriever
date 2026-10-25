@@ -34,7 +34,7 @@ def add_chunks(
     return rows
 
 
-def _version_scope(document_id: UUID | None):
+def _version_scope(document_id: UUID | None, document_ids: list[UUID] | None = None):
     """ID-HU-BE-015: by default only each version group's default version is
     searchable, so superseded (or pending-approval) versions never compete
     with the source of truth. An explicit `document_id` scopes the search to
@@ -46,7 +46,12 @@ def _version_scope(document_id: UUID | None):
         return Chunk.document_id.in_(
             select(Document.id).where(Document.id == document_id, Document.status != DocumentStatus.removed.value)
         )
-    return Chunk.document_id.in_(select(Document.id).where(Document.is_current.is_(True)))
+    current = select(Document.id).where(Document.is_current.is_(True))
+    if document_ids:
+        # Only these documents (still their default versions): the ones a
+        # question names (app/qa/query_expansion.py).
+        current = current.where(Document.id.in_(document_ids))
+    return Chunk.document_id.in_(current)
 
 
 def similarity_search(
@@ -56,6 +61,7 @@ def similarity_search(
     accessible_tags: set[str] | None = None,
     document_id: UUID | None = None,
     min_score: float | None = None,
+    document_ids: list[UUID] | None = None,
 ) -> list[tuple[Chunk, float]]:
     """Nearest chunks with their cosine similarity (1 - cosine distance,
     higher is more relevant), best first."""
@@ -63,7 +69,7 @@ def similarity_search(
     # LIMIT so excluded chunks never consume retrieval slots and never reach
     # the generation model.
     distance = Chunk.embedding.cosine_distance(query_embedding)
-    stmt = select(Chunk, distance).where(_version_scope(document_id))
+    stmt = select(Chunk, distance).where(_version_scope(document_id, document_ids))
     if accessible_tags is not None:
         stmt = stmt.where(Chunk.confidentiality_tag.in_(accessible_tags))
     if min_score is not None:
